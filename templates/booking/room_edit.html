@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block content %}<div class="narrow wide"><h1>{% if room %}编辑 {{ room.name }}{% else %}手动创建教室 / 实验室{% endif %}</h1><p class="muted">未知容量、楼层可以留空，之后补齐。公开页面不会将未知容量显示为实际人数。</p><section class="panel"><form method="post" class="stack-form">{% csrf_token %}{{ form.as_p }}<button class="button full">保存教室资料</button></form></section></div>{% endblock %}

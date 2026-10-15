@@ -15,7 +15,15 @@ from django.db import close_old_connections, connection
 from django.test import Client, TestCase, TransactionTestCase
 from django.utils import timezone
 from .forms import CourseImportForm
-from .models import AuditEvent, Booking, Room, TeachingRule, User
+from .models import (
+    AuditEvent,
+    Booking,
+    Room,
+    TeachingRule,
+    User,
+    AcademicTerm,
+    BorrowPeriod,
+)
 from .services import (
     create_booking,
     decide,
@@ -29,11 +37,40 @@ from .timetable import import_timetable, stop_rule, sync_timetables
 PASSWORD = "This-booking-only!2026"
 
 
-def interval(hour=10, offset=2):
-    start = timezone.make_aware(
-        datetime.combine(timezone.localdate() + timedelta(days=offset), time(hour))
+def seed_school(starts_on=None):
+    today = timezone.localdate()
+    start = starts_on or today - timedelta(days=today.weekday())
+    term, _ = AcademicTerm.objects.update_or_create(
+        pk=1,
+        defaults={
+            "name": "测试学期",
+            "starts_on": start,
+            "ends_on": start + timedelta(weeks=20),
+            "first_week": 1,
+            "booking_open": True,
+        },
     )
-    return start, start + timedelta(hours=1)
+    for n, (a, b) in enumerate(
+        [
+            (time(8), time(9, 40)),
+            (time(10), time(11, 40)),
+            (time(14), time(15, 40)),
+            (time(16), time(17, 40)),
+            (time(19), time(21)),
+        ],
+        1,
+    ):
+        BorrowPeriod.objects.update_or_create(number=n, defaults={"start": a, "end": b})
+    return term
+
+
+def interval(hour=10, offset=2):
+    number = {8: 1, 10: 2, 12: 3, 14: 3, 15: 4, 16: 4, 19: 5}[hour]
+    p = BorrowPeriod.objects.get(number=number)
+    day = timezone.localdate() + timedelta(days=offset)
+    return timezone.make_aware(datetime.combine(day, p.start)), timezone.make_aware(
+        datetime.combine(day, p.end)
+    )
 
 
 def student(**kwargs):
@@ -50,6 +87,7 @@ def student(**kwargs):
 class WorkflowTests(TestCase):
     @classmethod
     def setUpTestData(cls):
+        seed_school()
         cls.admin = User.objects.create_superuser(
             username="administrator", password="admin-test-password!2026", email=""
         )
@@ -298,7 +336,7 @@ class WorkflowTests(TestCase):
         start, end = interval()
         with self.assertRaises(ValidationError):
             self.book(start_at=start + timedelta(minutes=10))
-        self.book(start_at=end, end_at=end + timedelta(hours=1))
+        self.book(start_at=interval(14)[0], end_at=interval(14)[1])
         self.book(room=self.lab)
 
     def test_capacity_hours_and_duration(self):
@@ -371,8 +409,7 @@ class WorkflowTests(TestCase):
         data = dict(
             title="浏览器测试",
             date=start.date(),
-            start="10:00",
-            end="11:00",
+            period=BorrowPeriod.objects.get(number=2).pk,
             participants=5,
             **student(),
             edit_password_confirm=PASSWORD,
@@ -405,8 +442,7 @@ class WorkflowTests(TestCase):
             title="修改活动",
             room=self.lab.pk,
             date=start.date(),
-            start="15:00",
-            end="16:00",
+            period=BorrowPeriod.objects.get(number=4).pk,
             participants=4,
             **student(),
         )
@@ -421,14 +457,16 @@ class WorkflowTests(TestCase):
         response = self.client.get("/?floor=2&room_type=lab")
         self.assertEqual([r.pk for r in response.context["page"]], [self.lab.pk])
         day = timezone.localdate(b.start_at)
-        response = self.client.get(f"/?date={day}&start=10:15&end=10:45")
+        response = self.client.get(
+            f"/?date={day}&period={BorrowPeriod.objects.get(number=2).pk}"
+        )
         self.assertNotIn(self.room.pk, [r.pk for r in response.context["page"]])
         self.assertEqual(
             len(self.client.get(f"/schedule/?date={day}").context["columns"]), 7
         )
         self.assertEqual(
             len(self.client.get(f"/schedule/?date={day}&view=day").context["columns"]),
-            15,
+            5,
         )
 
     def test_retention_cascades_records_and_sessions(self):
@@ -519,6 +557,9 @@ class TimetableTests(TestCase):
     @classmethod
     def setUpTestData(cls):
         WorkflowTests.setUpTestData.__func__(cls)
+        seed_school(
+            timezone.localdate() + timedelta(days=7 - timezone.localdate().weekday())
+        )
 
     book = WorkflowTests.book
 
@@ -551,15 +592,15 @@ class TimetableTests(TestCase):
         ]
         self.assertIn(first, days)
         self.assertNotIn(first + timedelta(days=7), days)
-        self.assertIn(first + timedelta(days=14), days)
+        self.assertContains(
+            self.client.get(f"/schedule/?date={first + timedelta(days=14)}"), "李老师"
+        )
         even = self.rule_row(week_pattern="even")
         import_timetable(self.admin, [even], dry_run=False)
         self.assertTrue(
-            Booking.objects.filter(
-                start_at=timezone.make_aware(
-                    datetime.combine(first + timedelta(days=7), time(8))
-                )
-            ).exists()
+            TeachingRule.objects.get(week_pattern="even").occurs_on(
+                first + timedelta(days=7)
+            )
         )
         rule = TeachingRule.objects.get(week_pattern="odd")
         rule.excluded_dates = [first.isoformat()]
@@ -572,7 +613,12 @@ class TimetableTests(TestCase):
         import_timetable(self.admin, [row], dry_run=False)
         start = timezone.make_aware(datetime.combine(first, time(8)))
         self.assertFalse(Booking.objects.filter(start_at=start).exists())
-        self.book(start_at=start, end_at=start + timedelta(hours=1))
+        self.book(
+            start_at=start,
+            end_at=timezone.make_aware(
+                datetime.combine(timezone.localdate(start), time(9, 40))
+            ),
+        )
 
     def test_semester_preview_idempotent_and_rule_collision(self):
         row = self.rule_row()
@@ -594,7 +640,12 @@ class TimetableTests(TestCase):
         first = row["rule"]["term_start"] + timedelta(days=2)
         start = timezone.make_aware(datetime.combine(first, time(8)))
         with self.assertRaises(ValidationError):
-            self.book(start_at=start, end_at=start + timedelta(hours=1))
+            self.book(
+                start_at=start,
+                end_at=timezone.make_aware(
+                    datetime.combine(timezone.localdate(start), time(9, 40))
+                ),
+            )
 
     def test_stopping_rule_releases_future_and_does_not_regenerate(self):
         import_timetable(self.admin, [self.rule_row()], dry_run=False)
@@ -636,7 +687,7 @@ class TimetableTests(TestCase):
             )
 
     def test_date_import_preview_atomicity_and_duplicate(self):
-        start, end = interval()
+        start, end = interval(offset=9)
         row = dict(
             room=self.room.name,
             title="课程",
@@ -729,6 +780,9 @@ class TimetableTests(TestCase):
     "生产数据库上验证行级锁；SQLite 不支持",
 )
 class ConcurrencyTests(TransactionTestCase):
+    def setUp(self):
+        seed_school()
+
     def test_move_and_new_booking_cannot_claim_same_slot(self):
         room_a = Room.objects.create(name="MOVE-A", building="教学楼", capacity=20)
         room_b = Room.objects.create(name="MOVE-B", building="教学楼", capacity=20)

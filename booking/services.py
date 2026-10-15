@@ -7,6 +7,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 from django.utils import timezone
 from .models import AuditEvent, Booking, Room
+from .school import term_settings, period_for, check_term_date, ensure_import_rooms
 
 _DUMMY_PASSWORD_HASH = make_password(secrets.token_urlsafe(32))
 
@@ -67,24 +68,21 @@ def validate_interval(room, start_at, end_at, participants, *, course=False):
     start, end = timezone.localtime(start_at), timezone.localtime(end_at)
     if not room.is_active:
         raise ValidationError("该教室暂未开放。")
-    if start_at <= now or start_at > now + timedelta(
-        days=settings.BOOKING_ADVANCE_DAYS
+    term = term_settings()
+    check_term_date(term, start.date(), course=course)
+    if start_at <= now or (
+        not course and start_at > now + timedelta(days=settings.BOOKING_ADVANCE_DAYS)
     ):
         raise ValidationError(
             f"请选择未来 {settings.BOOKING_ADVANCE_DAYS} 天内的时间。"
         )
     if end_at <= start_at or start.date() != end.date():
         raise ValidationError("结束时间须晚于开始时间，且必须为同一天。")
-    if (
-        start.hour < 7
-        or end.hour > 22
-        or (end.hour == 22 and (end.minute or end.second))
-    ):
-        raise ValidationError("教室开放时间为 07:00–22:00。")
-    if not course and end_at - start_at > timedelta(hours=settings.BOOKING_MAX_HOURS):
-        raise ValidationError(f"单次预约不得超过 {settings.BOOKING_MAX_HOURS} 小时。")
-    if not 1 <= participants <= room.capacity:
-        raise ValidationError(f"使用人数须为 1–{room.capacity} 人。")
+    if not course and period_for(start_at, end_at) is None:
+        raise ValidationError("只能选择管理员设定的五个固定节次，不能自定义时段。")
+    maximum = room.capacity or 2000
+    if not 1 <= participants <= maximum:
+        raise ValidationError(f"使用人数须为 1–{maximum} 人。")
 
 
 def check_overlap(room, start, end, exclude=None):
@@ -107,6 +105,7 @@ def create_booking(
     # Every create/review/cancel/import takes the same room lock first.
     if user.is_authenticated and not user.is_staff:
         raise PermissionDenied
+    term_settings(lock=True)
     room = Room.objects.select_for_update().get(pk=room_id)
     if not accessible_rooms(user).filter(pk=room.pk).exists():
         raise PermissionDenied
@@ -148,6 +147,7 @@ def create_booking(
         end_at=end_at,
         participants=participants,
         status="approved",
+        period=period_for(start_at, end_at),
         **extra,
     )
     AuditEvent.objects.create(
@@ -160,6 +160,7 @@ def create_booking(
 
 @transaction.atomic
 def decide(user, pk, decision, reason=""):
+    term_settings(lock=True)
     initial = Booking.objects.retained().get(pk=pk)
     Room.objects.select_for_update().get(pk=initial.room_id)
     booking = Booking.objects.select_for_update().get(pk=pk)
@@ -257,6 +258,7 @@ def edit_booking(
     reason="",
     expected_version=None,
 ):
+    term_settings(lock=True)
     initial = Booking.objects.retained().get(pk=pk)
     locked = {
         r.pk: r
@@ -293,6 +295,12 @@ def edit_booking(
     validate_interval(
         room, start_at, end_at, participants, course=booking.kind == "course"
     )
+    if booking.kind == "booking" and end_at >= booking.created_at + timedelta(
+        days=settings.RETENTION_DAYS
+    ):
+        raise ValidationError(
+            "新的使用日期超出本记录的保留期限，请取消原预约并新建一笔预约。"
+        )
     check_overlap(room, start_at, end_at, exclude=pk)
     # Keep a masked operation note: snapshots containing student PII are unnecessary.
     changed = [
@@ -324,6 +332,8 @@ def edit_booking(
         # Revoke old lookup capabilities when identity information changes.
         booking.lookup_hash = None
     booking.status, booking.reason = "approved", reason.strip() if admin else ""
+    if booking.kind == "booking":
+        booking.period = period_for(start_at, end_at)
     booking.save()
     AuditEvent.objects.create(
         booking=booking,
@@ -338,54 +348,48 @@ def edit_booking(
 def import_course_rows(user, rows, *, dry_run):
     from .timetable import import_timetable
 
-    if any("rule" in row for row in rows):
-        return import_timetable(user, rows, dry_run=dry_run)
     if not user.is_staff:
         raise PermissionDenied
-    names = sorted({r["room"] for r in rows})
-    rooms = {
-        r.name: r
-        for r in Room.objects.select_for_update().filter(name__in=names).order_by("pk")
-    }
-    allowed = set(managed_rooms(user).values_list("pk", flat=True))
-    created = skipped = 0
-    for number, row in enumerate(rows, 2):
-        room = rooms.get(row["room"])
-        if not room or room.pk not in allowed:
-            raise ValidationError(f"第 {number} 行：教室不存在或无管理权限。")
-        try:
-            validate_interval(room, row["start_at"], row["end_at"], 1, course=True)
-            if (
-                Booking.objects.occupying()
-                .filter(
-                    room=room,
-                    kind="course",
-                    status="approved",
-                    title=row["title"],
-                    start_at=row["start_at"],
-                    end_at=row["end_at"],
-                )
-                .exists()
-            ):
-                skipped += 1
-                continue
-            check_overlap(room, row["start_at"], row["end_at"])
-        except ValidationError as exc:
-            raise ValidationError(f"第 {number} 行：{'；'.join(exc.messages)}") from exc
-        booking = Booking.objects.create(
-            room=room,
-            applicant=user,
-            kind="course",
-            status="approved",
-            title=row["title"],
-            start_at=row["start_at"],
-            end_at=row["end_at"],
-            reviewed_by=user,
-            reviewed_at=timezone.now(),
-            teacher_name=row.get("teacher", ""),
+    term = term_settings(lock=True)
+    ensure_import_rooms(rows)
+    converted = []
+    ended = 0
+    for row in rows:
+        if "rule" in row:
+            converted.append(row)
+            continue
+        start, end = (
+            timezone.localtime(row["start_at"]),
+            timezone.localtime(row["end_at"]),
         )
-        AuditEvent.objects.create(booking=booking, actor=user, action="导入教学占用")
-        created += 1
+        check_term_date(term, start.date(), course=True)
+        if start.date() != end.date() or end <= start:
+            raise ValidationError("课程必须为同一天内的有效起止时间。")
+        if end <= timezone.now():
+            ended += 1
+            continue
+        week = term.week_number(start.date())
+        converted.append(
+            {
+                "room": row["room"],
+                "room_meta": row.get("room_meta", {}),
+                "rule": {
+                    "title": row["title"],
+                    "teacher": row.get("teacher", ""),
+                    "term_start": term.week_one_monday,
+                    "week_start": week,
+                    "week_end": week,
+                    "week_pattern": "all",
+                    "weekday": start.isoweekday(),
+                    "start": start.time(),
+                    "end": end.time(),
+                    "excluded_dates": [],
+                },
+            }
+        )
+    created, skipped = (
+        import_timetable(user, converted, dry_run=False) if converted else (0, 0)
+    )
     if dry_run:
         transaction.set_rollback(True)
-    return created, skipped
+    return created, skipped + ended

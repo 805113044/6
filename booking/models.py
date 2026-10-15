@@ -1,4 +1,5 @@
 from datetime import timedelta
+from django.core.exceptions import ValidationError
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -25,16 +26,18 @@ class Room(models.Model):
     name = models.CharField("教室编号", max_length=40, unique=True)
     campus = models.CharField("校区", max_length=60, default="主校区")
     building = models.CharField("教学楼", max_length=60)
-    floor = models.PositiveSmallIntegerField("楼层", default=1)
+    floor = models.PositiveSmallIntegerField("楼层", null=True, blank=True)
     capacity = models.PositiveSmallIntegerField(
-        "容纳人数", validators=[MinValueValidator(1), MaxValueValidator(2000)]
+        "容纳人数",
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1), MaxValueValidator(2000)],
     )
     room_type = models.CharField(
         "类型",
         max_length=30,
         choices=[
-            ("lecture", "普通 / 多媒体教室"),
-            ("seminar", "研讨教室"),
+            ("lecture", "教室"),
             ("lab", "实验室"),
         ],
         default="lecture",
@@ -103,6 +106,13 @@ class Booking(models.Model):
     course_key = models.CharField(
         max_length=64, unique=True, null=True, blank=True, editable=False
     )
+    period = models.ForeignKey(
+        "BorrowPeriod",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        verbose_name="借用节次",
+    )
     title = models.CharField("用途 / 课程", max_length=100)
     participants = models.PositiveSmallIntegerField(
         "使用人数", default=1, validators=[MinValueValidator(1)]
@@ -132,6 +142,22 @@ class Booking(models.Model):
         if self.kind == self.Kind.COURSE:
             return self.teacher_name or "教学安排"
         return str(self.applicant) if self.applicant_id else self.student_name
+
+    @property
+    def period_label(self):
+        if self.period_id:
+            return str(self.period)
+        # Historic arbitrary-time reservations still block every overlapping period.
+        local_start, local_end = (
+            timezone.localtime(self.start_at),
+            timezone.localtime(self.end_at),
+        )
+        labels = [
+            str(p)
+            for p in BorrowPeriod.objects.all()
+            if p.start < local_end.time() and p.end > local_start.time()
+        ]
+        return "、".join(labels) or "非借用节次课程"
 
     class Meta:
         ordering = ["-created_at"]
@@ -207,3 +233,68 @@ class TeachingRule(models.Model):
             )
             and day.isoformat() not in self.excluded_dates
         )
+
+
+class AcademicTerm(models.Model):
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    name = models.CharField("学期名称", max_length=80)
+    starts_on = models.DateField("学期开始日期")
+    ends_on = models.DateField("学期结束日期")
+    first_week = models.PositiveSmallIntegerField(
+        "起始周数", default=1, validators=[MinValueValidator(1), MaxValueValidator(30)]
+    )
+    booking_open = models.BooleanField("开放本学期借用", default=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(pk=1), name="one_academic_term")
+        ]
+
+    @property
+    def week_one_monday(self):
+        return self.starts_on - timedelta(
+            days=self.starts_on.weekday(), weeks=self.first_week - 1
+        )
+
+    def week_number(self, day):
+        if not self.starts_on <= day <= self.ends_on:
+            return None
+        return (day - self.week_one_monday).days // 7 + 1
+
+    def clean(self):
+        if self.starts_on and self.ends_on and self.ends_on < self.starts_on:
+            raise ValidationError("学期结束日期不能早于开始日期。")
+        if (
+            self.starts_on
+            and self.ends_on
+            and (self.ends_on - self.week_one_monday).days >= 30 * 7
+        ):
+            raise ValidationError("学期末的周数不能超过第 30 周。")
+
+
+class BorrowPeriod(models.Model):
+    number = models.PositiveSmallIntegerField(
+        "节次序号", unique=True, validators=[MinValueValidator(1), MaxValueValidator(5)]
+    )
+    start = models.TimeField("实际开始时间")
+    end = models.TimeField("实际结束时间")
+
+    class Meta:
+        ordering = ["number"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(number__gte=1, number__lte=5),
+                name="five_borrow_periods",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(end__gt=models.F("start")),
+                name="period_end_after_start",
+            ),
+        ]
+
+    def __str__(self):
+        return ["第一节", "第二节", "第三节", "第四节", "第五节"][self.number - 1]
+
+    @property
+    def group(self):
+        return "上午" if self.number <= 2 else "下午" if self.number <= 4 else "晚上"

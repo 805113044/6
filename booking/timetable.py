@@ -22,15 +22,23 @@ def interval(rule, day):
 
 
 def rule_days(rule):
+    from .models import AcademicTerm
+
+    term = AcademicTerm.objects.filter(pk=1).first()
     for week in range(rule.week_start, rule.week_end + 1):
         day = rule.term_start + timedelta(weeks=week - 1, days=rule.weekday - 1)
-        if rule.occurs_on(day):
+        if rule.occurs_on(day) and (not term or term.starts_on <= day <= term.ends_on):
             yield day
 
 
 def check_rule_conflicts(room, start, end, exclude=None):
     """Definitive guard even before the hourly materializer reaches a new day."""
     day = timezone.localdate(start)
+    from .models import AcademicTerm
+
+    term = AcademicTerm.objects.filter(pk=1).first()
+    if term and not term.starts_on <= day <= term.ends_on:
+        return
     for rule in TeachingRule.objects.filter(room=room, is_active=True):
         if not rule.occurs_on(day):
             continue
@@ -52,7 +60,7 @@ def materialize_rule(rule):
     created = skipped = 0
     for day in rule_days(rule):
         start, end = interval(rule, day)
-        if start <= now or start > horizon:
+        if end <= now or start > horizon:
             continue
         key = occurrence_key(rule, day)
         if Booking.objects.retained().filter(course_key=key).exists():
@@ -89,6 +97,10 @@ def materialize_rule(rule):
 def import_timetable(user, rows, *, dry_run):
     if not user.is_staff:
         raise PermissionDenied
+    from .school import term_settings, ensure_import_rooms
+
+    term = term_settings(lock=True)
+    ensure_import_rooms(rows)
     rooms = {
         r.name: r
         for r in Room.objects.select_for_update()
@@ -107,11 +119,12 @@ def import_timetable(user, rows, *, dry_run):
             json.dumps({"room": room.pk, **data}, sort_keys=True, default=str).encode()
         ).hexdigest()
         rule = TeachingRule(room=room, key=key, created_by=user, **data)
-        future_days = [d for d in rule_days(rule) if interval(rule, d)[0] > now]
+        if rule.term_start != term.week_one_monday:
+            raise ValidationError("课表周次与当前学期设置不一致。")
+        future_days = [d for d in rule_days(rule) if interval(rule, d)[1] > now]
         if not future_days:
-            raise ValidationError(
-                f"第 {number} 行没有尚未开始的教学日期，请检查周次和单双周。"
-            )
+            skipped += 1
+            continue
         existing = TeachingRule.objects.filter(key=key).first()
         if existing:
             skipped += 1
@@ -135,12 +148,19 @@ def import_timetable(user, rows, *, dry_run):
 
 
 def sync_timetables():
+    from .models import AcademicTerm
+
+    if not AcademicTerm.objects.filter(pk=1).exists():
+        return
     for pk in (
         TeachingRule.objects.filter(is_active=True)
         .values_list("pk", flat=True)
         .iterator()
     ):
         with transaction.atomic():
+            from .school import term_settings
+
+            term_settings(lock=True)
             initial = TeachingRule.objects.get(pk=pk)
             Room.objects.select_for_update().get(pk=initial.room_id)
             rule = TeachingRule.objects.select_for_update().get(pk=pk)
@@ -154,14 +174,19 @@ def sync_timetables():
 
 def planned_entries(room_ids, days):
     """Show later semester weeks truthfully without storing long-lived bookings."""
+    from .models import AcademicTerm
+
+    term = AcademicTerm.objects.filter(pk=1).first()
     candidates = []
     for rule in TeachingRule.objects.filter(
         room_id__in=room_ids, is_active=True
     ).select_related("room"):
         for day in days:
-            if rule.occurs_on(day):
+            if rule.occurs_on(day) and (
+                not term or term.starts_on <= day <= term.ends_on
+            ):
                 start, end = interval(rule, day)
-                if start > timezone.now():
+                if end > timezone.now():
                     candidates.append((rule, start, end, occurrence_key(rule, day)))
     existing = set(
         Booking.objects.retained()

@@ -80,6 +80,12 @@ class SchoolLoginView(LoginView):
 
 
 def selected_day(request):
+    from .models import AcademicTerm
+
+    term = AcademicTerm.objects.filter(pk=1).first()
+    week = request.GET.get("week", "")
+    if term and week.isdigit() and term.first_week <= int(week) <= 30:
+        return term.week_one_monday + timedelta(weeks=int(week) - 1)
     try:
         return date.fromisoformat(request.GET.get("date", ""))
     except ValueError:
@@ -111,47 +117,28 @@ def room_filters(request, qs):
 
 
 def rooms(request):
+    from .models import AcademicTerm, BorrowPeriod
+    from .school import availability
+
     day = selected_day(request)
-    start, end = day_bounds(day)
+    periods = list(BorrowPeriod.objects.all())
     base = accessible_rooms(request.user).filter(is_active=True)
-    qs = room_filters(request, base)
-    occupied = Booking.objects.occupying().filter(start_at__lt=end, end_at__gt=start)
-    # Optional availability filtering requires a full interval; any overlap blocks it.
-    if request.GET.get("start") and request.GET.get("end"):
-        try:
-            a = timezone.make_aware(
-                datetime.combine(day, time.fromisoformat(request.GET["start"]))
-            )
-            b = timezone.make_aware(
-                datetime.combine(day, time.fromisoformat(request.GET["end"]))
-            )
-            if b <= a:
-                raise ValueError
-            qs = qs.exclude(
-                pk__in=Booking.objects.occupying()
-                .filter(start_at__lt=b, end_at__gt=a)
-                .values("room_id")
-            )
-        except ValueError:
-            messages.error(request, "空闲筛选的结束时间须晚于开始时间。")
-    page = Paginator(qs, 12).get_page(request.GET.get("page"))
-    # Materialize this page: MySQL rejects LIMIT inside an IN subquery.
-    room_ids = [room.pk for room in page.object_list]
-    counts = {
-        r["room_id"]: r["n"]
-        for r in occupied.filter(room_id__in=room_ids)
-        .values("room_id")
-        .annotate(n=Count("id"))
-    }
+    candidates = list(room_filters(request, base))
+    matrix = availability(candidates, day, periods)
+    selected = request.GET.get("period", "")
+    if selected.isdigit():
+        candidates = [
+            r
+            for r in candidates
+            if any(c["period"].pk == int(selected) and c["free"] for c in matrix[r.pk])
+        ]
+    page = Paginator(candidates, 12).get_page(request.GET.get("page"))
     for room in page:
-        room.daily_count = counts.get(room.pk, 0)
-        room.borrowers = list(
-            occupied.filter(room=room)
-            .select_related("applicant")
-            .order_by("start_at")[:4]
-        )
+        room.cells = matrix[room.pk]
+        room.daily_count = sum(bool(c["entries"]) for c in room.cells)
     params = request.GET.copy()
     params.pop("page", None)
+    term = AcademicTerm.objects.filter(pk=1).first()
     return render(
         request,
         "booking/rooms.html",
@@ -159,6 +146,9 @@ def rooms(request):
             "page": page,
             "query_string": params.urlencode(),
             "day": day,
+            "periods": periods,
+            "term": term,
+            "week_number": term.week_number(day) if term else None,
             "campuses": base.values_list("campus", flat=True)
             .distinct()
             .order_by("campus"),
@@ -167,80 +157,54 @@ def rooms(request):
             .order_by("building"),
             "room_types": Room._meta.get_field("room_type").choices,
             "room_count": base.count(),
-            "today_count": occupied.filter(room__in=base).count(),
-            "pending_count": Booking.objects.retained()
-            .filter(
-                room__in=managed_rooms(request.user),
-                status="approved",
-                kind="booking",
-                end_at__gt=timezone.now(),
-            )
-            .count(),
+            "today_count": sum(
+                bool(c["entries"]) for row in matrix.values() for c in row
+            ),
+            "pending_count": Booking.objects.occupying()
+            .filter(kind="booking", end_at__gt=timezone.now())
+            .count()
+            if request.user.is_staff
+            else 0,
         },
     )
 
 
 def schedule(request):
+    from .models import AcademicTerm, BorrowPeriod
+    from .school import availability
+
     day = selected_day(request)
     mode = "day" if request.GET.get("view") == "day" else "week"
     first = day if mode == "day" else day - timedelta(days=day.weekday())
     days = [first + timedelta(days=i) for i in range(1 if mode == "day" else 7)]
-    rooms_qs = room_filters(
-        request, accessible_rooms(request.user).filter(is_active=True)
-    )
-    page = Paginator(rooms_qs, 10).get_page(request.GET.get("page"))
-    ids = [r.pk for r in page.object_list]
-    entries = list(
-        Booking.objects.occupying()
-        .filter(
-            room_id__in=ids,
-            start_at__gte=day_bounds(first)[0],
-            start_at__lt=day_bounds(days[-1])[1],
-        )
-        .select_related("applicant")
-        .order_by("start_at")
-    )
-    columns = days if mode == "week" else list(range(7, 22))
-    from .timetable import planned_entries
-
-    entries.extend(planned_entries(ids, days))
-    entries.sort(key=lambda b: b.start_at)
+    periods = list(BorrowPeriod.objects.all())
+    page = Paginator(
+        room_filters(request, accessible_rooms(request.user).filter(is_active=True)), 10
+    ).get_page(request.GET.get("page"))
+    rooms = list(page.object_list)
+    matrices = {d: availability(rooms, d, periods) for d in days}
     rows = []
-    for room in page:
-        cells = []
-        for column in columns:
-            if mode == "week":
-                matches = [
-                    b
-                    for b in entries
-                    if b.room_id == room.pk and timezone.localdate(b.start_at) == column
-                ]
-            else:
-                start = timezone.make_aware(datetime.combine(day, time(column)))
-                matches = [
-                    b
-                    for b in entries
-                    if b.room_id == room.pk
-                    and b.start_at < start + timedelta(hours=1)
-                    and b.end_at > start
-                ]
-            cells.append(matches)
+    for room in rooms:
+        if mode == "day":
+            cells = matrices[day][room.pk]
+        else:
+            cells = [{"day": d, "periods": matrices[d][room.pk]} for d in days]
         rows.append({"room": room, "cells": cells})
     params = request.GET.copy()
     params.pop("page", None)
-    navigation = request.GET.copy()
-    navigation.pop("page", None)
+    navigation = params.copy()
     navigation["date"] = (first - timedelta(days=len(days))).isoformat()
     previous = navigation.urlencode()
     navigation["date"] = (first + timedelta(days=len(days))).isoformat()
     following = navigation.urlencode()
+    term = AcademicTerm.objects.filter(pk=1).first()
     return render(
         request,
         "booking/schedule.html",
         {
             "page": page,
             "rows": rows,
-            "columns": columns,
+            "columns": days if mode == "week" else periods,
             "mode": mode,
             "day": day,
             "first": first,
@@ -249,6 +213,18 @@ def schedule(request):
             "following": following,
             "query_string": params.urlencode(),
             "room_types": Room._meta.get_field("room_type").choices,
+            "term": term,
+            "week_number": (
+                term.week_number(max(first, term.starts_on))
+                if mode == "week"
+                and term
+                and first <= term.ends_on
+                and days[-1] >= term.starts_on
+                else term.week_number(day)
+                if term
+                else None
+            ),
+            "days": days,
         },
     )
 
@@ -262,7 +238,10 @@ def room_detail(request, pk):
     )
     day = selected_day(request)
     form_class = BookingForm if request.user.is_staff else StudentBookingForm
-    form = form_class(request.POST or None, initial={"date": day, "participants": 1})
+    form = form_class(
+        request.POST or None,
+        initial={"date": day, "participants": 1, "period": request.GET.get("period")},
+    )
     if request.method == "POST" and form.is_valid():
         if not throttle(request, "booking", 100):
             form.add_error(None, "提交较频繁，请 15 分钟后重试。")
@@ -302,29 +281,24 @@ def room_detail(request, pk):
                 return redirect("my_bookings")
             except ValidationError as exc:
                 form.add_error(None, exc)
-    start, end = day_bounds(day)
-    slots = (
-        Booking.objects.occupying()
-        .filter(room=room, start_at__lt=end, end_at__gt=start)
-        .order_by("start_at")
-    )
-    from .timetable import planned_entries
+    from .models import BorrowPeriod, AcademicTerm
+    from .school import availability
 
-    slots = sorted(
-        list(slots) + planned_entries([room.pk], [day]), key=lambda b: b.start_at
-    )
-    # Public schedule includes only names; PII stays behind per-record verification.
+    periods = list(BorrowPeriod.objects.all())
+    cells = availability([room], day, periods)[room.pk]
+    term = AcademicTerm.objects.filter(pk=1).first()
     return render(
         request,
         "booking/detail.html",
         {
             "room": room,
             "day": day,
-            "slots": slots,
+            "cells": cells,
             "form": form,
-            "max_hours": settings.BOOKING_MAX_HOURS,
             "advance_days": settings.BOOKING_ADVANCE_DAYS,
             "cancel_minutes": settings.CANCEL_BEFORE_MINUTES,
+            "term": term,
+            "week_number": term.week_number(day) if term else None,
         },
     )
 
@@ -424,15 +398,14 @@ def booking_edit(request, pk):
     owner = guest_owns(request, booking)
     if not request.user.is_staff and not owner:
         return redirect("verify_booking", pk=pk)
-    local_start, local_end = (
-        timezone.localtime(booking.start_at),
-        timezone.localtime(booking.end_at),
-    )
+    local_start = timezone.localtime(booking.start_at)
+    from .school import period_for
+
     initial = {
         "room": booking.room_id,
         "date": local_start.date(),
-        "start": local_start.time(),
-        "end": local_end.time(),
+        "period": booking.period_id
+        or getattr(period_for(booking.start_at, booking.end_at), "pk", None),
         "title": booking.title,
         "participants": booking.participants,
     }
@@ -576,6 +549,15 @@ def import_courses(request):
     result = None
     if request.method == "POST" and form.is_valid():
         try:
+            rows = form.cleaned_data["file"]
+            new_rooms = len(
+                {r["room"] for r in rows}
+                - set(
+                    Room.objects.filter(name__in=[r["room"] for r in rows]).values_list(
+                        "name", flat=True
+                    )
+                )
+            )
             created, skipped = import_course_rows(
                 request.user,
                 form.cleaned_data["file"],
@@ -584,6 +566,7 @@ def import_courses(request):
             result = {
                 "created": created,
                 "skipped": skipped,
+                "new_rooms": new_rooms,
                 "saved": form.cleaned_data["confirm"],
             }
         except ValidationError as exc:
@@ -615,71 +598,139 @@ def stop_timetable(request, pk):
 
 @staff_required
 def course_template(request):
-    recurring = request.GET.get("kind") == "semester"
-    monday = timezone.localdate() - timedelta(days=timezone.localdate().weekday())
+    recurring = request.GET.get("kind") != "date"
     header = (
         [
-            "room",
-            "title",
-            "teacher",
-            "term_start",
-            "week_start",
-            "week_end",
-            "week_pattern",
-            "weekday",
-            "start",
-            "end",
-            "excluded_dates",
+            "教室",
+            "课程名称",
+            "任课教师",
+            "周次",
+            "单双周",
+            "星期",
+            "节次",
+            "排除日期",
+            "校区",
+            "楼栋",
+            "楼层",
+            "教室类型",
+            "容量",
         ]
         if recurring
-        else ["room", "title", "date", "start", "end", "teacher"]
+        else [
+            "教室",
+            "课程名称",
+            "任课教师",
+            "日期",
+            "节次",
+            "校区",
+            "楼栋",
+            "楼层",
+            "教室类型",
+            "容量",
+        ]
     )
     sample = (
         [
             "A101",
             "高等数学",
             "张老师",
-            monday.isoformat(),
-            1,
-            18,
-            "odd",
-            3,
-            "08:00",
-            "09:40",
+            "1-18",
+            "单周",
+            "星期三",
+            "第一节",
             "",
+            "主校区",
+            "教学楼",
+            "1",
+            "教室",
+            "60",
         ]
         if recurring
         else [
             "A101",
             "高等数学",
-            (timezone.localdate() + timedelta(days=2)).isoformat(),
-            "08:00",
-            "09:40",
             "张老师",
+            (timezone.localdate() + timedelta(days=2)).isoformat(),
+            "第一节",
+            "主校区",
+            "教学楼",
+            "1",
+            "教室",
+            "60",
         ]
     )
-    if request.GET.get("format") == "xlsx":
+    # Numeric section values are equally accepted; Chinese labels are clearer for schools.
+    sample[6 if recurring else 4] = "1"
+    if request.GET.get("format") != "csv":
         from openpyxl import Workbook
 
         response = HttpResponse(
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        response["Content-Disposition"] = (
-            'attachment; filename="timetable-template.xlsx"'
-        )
-        workbook = Workbook()
-        sheet = workbook.active
+        response["Content-Disposition"] = 'attachment; filename="class-timetable.xlsx"'
+        wb = Workbook()
+        sheet = wb.active
+        sheet.title = "正式课程"
         sheet.append(header)
         sheet.append(sample)
-        workbook.save(response)
+        for column in sheet.columns:
+            sheet.column_dimensions[column[0].column_letter].width = 18
+        wb.save(response)
         return response
     response = HttpResponse(content_type="text/csv; charset=utf-8")
-    response["Content-Disposition"] = 'attachment; filename="timetable-template.csv"'
+    response["Content-Disposition"] = 'attachment; filename="class-timetable.csv"'
     response.write("\ufeff")
     writer = csv.writer(response)
     writer.writerow(header)
     writer.writerow(sample)
     return response
+
+
+@staff_required
+def school_settings(request):
+    from .forms import SchoolSettingsForm
+    from .models import AcademicTerm, BorrowPeriod
+    from .school import save_school
+
+    term = AcademicTerm.objects.filter(pk=1).first()
+    initial = (
+        {
+            field: getattr(term, field)
+            for field in ("name", "starts_on", "ends_on", "first_week", "booking_open")
+        }
+        if term
+        else {}
+    )
+    for p in BorrowPeriod.objects.all():
+        initial[f"p{p.number}_start"] = p.start
+        initial[f"p{p.number}_end"] = p.end
+    form = SchoolSettingsForm(request.POST or None, initial=initial)
+    if request.method == "POST" and form.is_valid():
+        try:
+            save_school(request.user, form.cleaned_data)
+            messages.success(request, "学期与五个借用节次已保存。")
+            return redirect("school_settings")
+        except ValidationError as exc:
+            form.add_error(None, exc)
+    return render(request, "booking/school_settings.html", {"form": form, "term": term})
+
+
+@staff_required
+def manage_rooms(request):
+    return render(request, "booking/manage_rooms.html", {"rooms": Room.objects.all()})
+
+
+@staff_required
+def room_edit(request, pk=None):
+    from .forms import RoomForm
+
+    room = get_object_or_404(Room, pk=pk) if pk else None
+    form = RoomForm(request.POST or None, instance=room)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "教室资料已保存。")
+        return redirect("manage_rooms")
+    return render(request, "booking/room_edit.html", {"form": form, "room": room})
 
 
 def safe_csv(value):

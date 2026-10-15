@@ -1,210 +1,46 @@
 import csv
 import io
-from datetime import date, datetime, time, timedelta
+import re
 import zipfile
+from datetime import date, datetime, time, timedelta
 from xml.etree.ElementTree import ParseError
 from defusedxml.common import DefusedXmlException
 from openpyxl.utils.exceptions import InvalidFileException
 from django import forms
 from django.core.exceptions import ValidationError
 from django.utils import timezone
+from .models import BorrowPeriod, Room
+from .school import term_settings
 
 
 class BookingForm(forms.Form):
     title = forms.CharField(
         label="预约用途",
         max_length=100,
-        widget=forms.TextInput(attrs={"placeholder": "例如：学习小组研讨、班级活动"}),
+        widget=forms.TextInput(attrs={"placeholder": "例如：小组研讨、班级活动"}),
     )
     date = forms.DateField(
         label="使用日期",
         widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
     )
-    start = forms.TimeField(
-        label="开始时间",
-        widget=forms.TimeInput(
-            format="%H:%M", attrs={"type": "time", "min": "07:00", "max": "22:00"}
-        ),
+    period = forms.ModelChoiceField(
+        label="借用节次", queryset=BorrowPeriod.objects.all(), empty_label="请选择节次"
     )
-    end = forms.TimeField(
-        label="结束时间",
-        widget=forms.TimeInput(
-            format="%H:%M", attrs={"type": "time", "min": "07:00", "max": "22:00"}
-        ),
-    )
-    participants = forms.IntegerField(label="使用人数", min_value=1)
+    participants = forms.IntegerField(label="使用人数", min_value=1, max_value=2000)
 
     def clean(self):
         data = super().clean()
-        if all(x in data for x in ("date", "start", "end")):
+        if "start" in self.data or "end" in self.data:
+            raise ValidationError("借用只能选择固定节次，不能提交自定义起止时间。")
+        if data.get("date") and data.get("period"):
+            period = data["period"]
             data["start_at"] = timezone.make_aware(
-                datetime.combine(data["date"], data["start"])
+                datetime.combine(data["date"], period.start)
             )
             data["end_at"] = timezone.make_aware(
-                datetime.combine(data["date"], data["end"])
+                datetime.combine(data["date"], period.end)
             )
         return data
-
-
-class CourseImportForm(forms.Form):
-    file = forms.FileField(
-        label="课表文件（CSV / XLSX）",
-        widget=forms.FileInput(attrs={"accept": ".csv,.xlsx"}),
-    )
-    confirm = forms.BooleanField(
-        label="确认写入（不勾选仅预览验证，不保存）", required=False
-    )
-
-    def clean_file(self):
-        upload = self.cleaned_data["file"]
-        if upload.size > 1024 * 1024:
-            raise ValidationError("文件不能超过 1 MB。")
-        try:
-            raw = upload.read()
-            if upload.name.lower().endswith(".xlsx"):
-                from openpyxl import load_workbook
-
-                with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-                    if (
-                        len(archive.infolist()) > 2000
-                        or sum(x.file_size for x in archive.infolist())
-                        > 10 * 1024 * 1024
-                    ):
-                        raise ValidationError("XLSX 解压内容过大。")
-                workbook = load_workbook(
-                    io.BytesIO(raw), read_only=True, data_only=True, keep_links=False
-                )
-                try:
-                    values = workbook.active.iter_rows(values_only=True)
-                    header = [str(v).strip() for v in next(values, ())]
-                    records = []
-                    for index, values_row in enumerate(values):
-                        if index >= 500:
-                            raise ValidationError("单次最多导入 500 行。")
-                        if not any(v is not None for v in values_row):
-                            continue
-
-                        def cell(v):
-                            if isinstance(v, datetime):
-                                return (
-                                    v.date().isoformat()
-                                    if v.time() == time.min
-                                    else v.isoformat()
-                                )
-                            if isinstance(v, (date, time)):
-                                return v.isoformat()
-                            return "" if v is None else str(v).strip()
-
-                        records.append(dict(zip(header, [cell(v) for v in values_row])))
-                    reader = records
-                finally:
-                    workbook.close()
-            else:
-                reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig")))
-                header = reader.fieldnames
-            dated = ["room", "title", "date", "start", "end"]
-            recurring = [
-                "room",
-                "title",
-                "teacher",
-                "term_start",
-                "week_start",
-                "week_end",
-                "week_pattern",
-                "weekday",
-                "start",
-                "end",
-                "excluded_dates",
-            ]
-            if header not in (dated, dated + ["teacher"], recurring):
-                raise ValidationError(
-                    "表头与日期模板或学期单双周模板不一致，请先下载模板。"
-                )
-            rows = []
-            for number, row in enumerate(reader, 2):
-                if number > 501:
-                    raise ValidationError("单次最多导入 500 行。")
-                if None in row or any(v is None for v in row.values()):
-                    raise ValidationError(f"第 {number} 行列数错误。")
-                if header == recurring:
-                    try:
-                        rule = {k: row[k].strip() for k in recurring}
-                        rule["term_start"] = date.fromisoformat(rule["term_start"])
-                        for key in ("week_start", "week_end", "weekday"):
-                            rule[key] = int(rule[key])
-                        rule["week_pattern"] = {
-                            "单周": "odd",
-                            "双周": "even",
-                            "每周": "all",
-                        }.get(rule["week_pattern"], rule["week_pattern"])
-                        rule["start"], rule["end"] = (
-                            time.fromisoformat(rule["start"]),
-                            time.fromisoformat(rule["end"]),
-                        )
-                        rule["excluded_dates"] = [
-                            date.fromisoformat(x.strip()).isoformat()
-                            for x in rule["excluded_dates"].split(";")
-                            if x.strip()
-                        ]
-                        if (
-                            rule["term_start"].weekday() != 0
-                            or not 1 <= rule["week_start"] <= rule["week_end"] <= 30
-                            or not 1 <= rule["weekday"] <= 7
-                            or rule["week_pattern"] not in ("all", "odd", "even")
-                            or not time(7) <= rule["start"] < rule["end"] <= time(22)
-                            or not rule["room"]
-                            or not 1 <= len(rule["title"]) <= 100
-                            or not 1 <= len(rule["teacher"]) <= 60
-                        ):
-                            raise ValueError
-                        if rule["term_start"] > timezone.localdate() + timedelta(
-                            days=365
-                        ):
-                            raise ValueError
-                        rule.pop("room")
-                        rows.append({"room": row["room"].strip(), "rule": rule})
-                        continue
-                    except (ValueError, KeyError, TypeError) as exc:
-                        raise ValidationError(
-                            f"第 {number} 行学期格式错误：首周从周一开始，周次 1–30，星期 1–7，模式 all/odd/even 或 每周/单周/双周。"
-                        ) from exc
-                form = BookingForm(
-                    {
-                        "title": row["title"],
-                        "date": row["date"],
-                        "start": row["start"],
-                        "end": row["end"],
-                        "participants": 1,
-                    }
-                )
-                if not row["room"].strip() or not form.is_valid():
-                    raise ValidationError(
-                        f"第 {number} 行数据格式错误，日期用 YYYY-MM-DD，时间用 HH:MM。"
-                    )
-                rows.append(
-                    {
-                        "room": row["room"].strip(),
-                        "teacher": row.get("teacher", "")[:60],
-                        **form.cleaned_data,
-                    }
-                )
-            if not rows:
-                raise ValidationError("文件中没有课程数据。")
-            return rows
-        except (
-            UnicodeDecodeError,
-            csv.Error,
-            zipfile.BadZipFile,
-            KeyError,
-            OSError,
-            ValueError,
-            ParseError,
-            DefusedXmlException,
-            InvalidFileException,
-        ) as exc:
-            raise ValidationError(
-                "文件损坏或格式错误，请使用 UTF-8 CSV 或标准 XLSX。"
-            ) from exc
 
 
 class StudentBookingForm(BookingForm):
@@ -215,17 +51,17 @@ class StudentBookingForm(BookingForm):
         label="联系方式（手机或校内邮箱）", max_length=100
     )
     consent = forms.BooleanField(
-        label="同意公开借用人姓名，其余信息仅本人及管理员可见；预约记录最多保留 60 天"
+        label="同意公开姓名，其余信息仅本人和管理员可见；预约信息最多保留一个月（30天）"
     )
     edit_password = forms.CharField(
-        label="本次预约的修改密码",
+        label="本次预约修改密码",
         min_length=10,
         max_length=128,
         widget=forms.PasswordInput,
-        help_text="不是校园账号密码；每笔可不同，修改/取消时使用，请自行保存。",
+        help_text="每笔可以不同，请自行保存。不是校园账号密码。",
     )
     edit_password_confirm = forms.CharField(
-        label="再次输入本次密码", widget=forms.PasswordInput, max_length=128
+        label="再次输入本次密码", max_length=128, widget=forms.PasswordInput
     )
 
     def clean(self):
@@ -236,7 +72,7 @@ class StudentBookingForm(BookingForm):
 
 
 class BookingEditForm(BookingForm):
-    room = forms.ModelChoiceField(label="教室", queryset=None)
+    room = forms.ModelChoiceField(label="教室", queryset=Room.objects.all())
     student_name = forms.CharField(
         label="借用人姓名（公开）", max_length=60, required=False
     )
@@ -246,7 +82,7 @@ class BookingEditForm(BookingForm):
     )
     student_contact = forms.CharField(label="联系方式", max_length=100, required=False)
     edit_password = forms.CharField(
-        label="更换本次修改密码（留空保留）",
+        label="更换本次密码（留空保留）",
         required=False,
         min_length=10,
         max_length=128,
@@ -260,3 +96,364 @@ class BookingEditForm(BookingForm):
         self.fields["reason"].required = admin
         if not admin:
             self.fields.pop("reason")
+
+
+class SchoolSettingsForm(forms.Form):
+    name = forms.CharField(label="学期名称", max_length=80)
+    starts_on = forms.DateField(
+        label="学期开始日期",
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+    )
+    ends_on = forms.DateField(
+        label="学期结束日期",
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+    )
+    first_week = forms.IntegerField(
+        label="开始日期所在的起始周数", min_value=1, max_value=30, initial=1
+    )
+    booking_open = forms.BooleanField(
+        label="开放本学期借用", required=False, initial=True
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for p in BorrowPeriod.objects.all():
+            for suffix, label in [("start", "实际开始"), ("end", "实际结束")]:
+                self.fields[f"p{p.number}_{suffix}"] = forms.TimeField(
+                    label=f"{p.group} · {p} · {label}",
+                    widget=forms.TimeInput(format="%H:%M", attrs={"type": "time"}),
+                )
+
+
+class RoomForm(forms.ModelForm):
+    class Meta:
+        model = Room
+        fields = [
+            "name",
+            "campus",
+            "building",
+            "floor",
+            "capacity",
+            "room_type",
+            "equipment",
+            "department",
+            "is_active",
+        ]
+
+
+ALIASES = {
+    "教室": "room",
+    "教室编号": "room",
+    "上课教室": "room",
+    "教室名称": "room",
+    "地点": "room",
+    "课程": "title",
+    "课程名称": "title",
+    "课程名": "title",
+    "教师": "teacher",
+    "任课教师": "teacher",
+    "授课教师": "teacher",
+    "日期": "date",
+    "上课日期": "date",
+    "开始时间": "start",
+    "结束时间": "end",
+    "起始周": "week_start",
+    "开始周": "week_start",
+    "结束周": "week_end",
+    "终止周": "week_end",
+    "单双周": "week_pattern",
+    "周模式": "week_pattern",
+    "周次": "weeks",
+    "星期": "weekday",
+    "星期几": "weekday",
+    "周几": "weekday",
+    "节次": "period",
+    "节数": "period",
+    "上课节次": "period",
+    "排除日期": "excluded_dates",
+    "校区": "campus",
+    "楼栋": "building",
+    "教学楼": "building",
+    "楼层": "floor",
+    "人数": "capacity",
+    "容量": "capacity",
+    "教室类型": "room_type",
+    "类型": "room_type",
+    "首周周一": "term_start",
+}
+
+
+def parse_weekday(value):
+    value = str(value).strip().replace("星期", "").replace("周", "")
+    return (
+        int(value)
+        if value.isdigit()
+        else {
+            "一": 1,
+            "二": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "日": 7,
+            "天": 7,
+        }.get(value, 0)
+    )
+
+
+def week_spec(value):
+    text = str(value).strip().replace("（", "(").replace("）", ")")
+    parity = "odd" if "单" in text else "even" if "双" in text else "all"
+    text = re.sub(r"\([^)]*\)|[周单双]", "", text)
+    weeks = set()
+    for part in re.split("[,，;；]", text):
+        m = re.fullmatch(r"\s*(\d+)\s*(?:[-~至]\s*(\d+))?\s*", part)
+        if not m:
+            raise ValueError
+        a, b = int(m[1]), int(m[2] or m[1])
+        if not 1 <= a <= b <= 30:
+            raise ValueError
+        weeks.update(range(a, b + 1))
+    return weeks, parity
+
+
+def course_times(row):
+    if row.get("period"):
+        row = {
+            **row,
+            "period": {
+                "第一节": "1",
+                "第二节": "2",
+                "第三节": "3",
+                "第四节": "4",
+                "第五节": "5",
+            }.get(row["period"], row["period"]),
+        }
+        m = re.fullmatch(
+            r"(?:第)?\s*([1-5])\s*(?:[-~至]\s*([1-5]))?\s*节?", row["period"]
+        )
+        if not m:
+            raise ValueError("课程节次须为 1–5 或连续范围，例如 1-2；不连续请分行")
+        a, b = int(m[1]), int(m[2] or m[1])
+        periods = {p.number: p for p in BorrowPeriod.objects.all()}
+        if a > b or a not in periods or b not in periods:
+            raise ValueError("借用节次尚未设置完整")
+        return periods[a].start, periods[b].end
+    return time.fromisoformat(row["start"]), time.fromisoformat(row["end"])
+
+
+def metadata(row):
+    result = {k: row[k] for k in ("campus", "building") if row.get(k)}
+    for key in result:
+        if len(result[key]) > 60:
+            raise ValueError("校区或楼栋名称过长")
+    for key in ("floor", "capacity"):
+        if row.get(key):
+            value = int(row[key])
+            maximum = 99 if key == "floor" else 2000
+            if not (0 if key == "floor" else 1) <= value <= maximum:
+                raise ValueError("楼层或容量超出范围")
+            result[key] = value
+    if row.get("room_type"):
+        value = {
+            "教室": "lecture",
+            "普通教室": "lecture",
+            "多媒体教室": "lecture",
+            "实验室": "lab",
+            "实验教室": "lab",
+            "seminar": "lecture",
+        }.get(row["room_type"], row["room_type"])
+        if value not in ("lecture", "lab"):
+            raise ValueError("类型请填写教室或实验室")
+        result["room_type"] = value
+    return result
+
+
+class CourseImportForm(forms.Form):
+    file = forms.FileField(
+        label="正式课程课表（Excel XLSX / CSV）",
+        widget=forms.FileInput(attrs={"accept": ".xlsx,.csv"}),
+    )
+    confirm = forms.BooleanField(label="直接导入（不勾选时仅预览验证）", required=False)
+
+    def clean_file(self):
+        upload = self.cleaned_data["file"]
+        if upload.size > 1024 * 1024:
+            raise ValidationError("文件不能超过 1 MB。")
+        term = term_settings()
+        try:
+            raw = upload.read()
+            if upload.name.lower().endswith(".xlsx"):
+                from openpyxl import load_workbook
+
+                with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                    if (
+                        len(archive.infolist()) > 2000
+                        or sum(x.file_size for x in archive.infolist())
+                        > 10 * 1024 * 1024
+                    ):
+                        raise ValidationError("XLSX 解压内容过大。")
+                wb = load_workbook(
+                    io.BytesIO(raw), read_only=True, data_only=True, keep_links=False
+                )
+                try:
+                    values = wb.worksheets[0].iter_rows(values_only=True)
+                    header = list(next(values, ()))
+                    records = []
+                    for i, row in enumerate(values):
+                        if i >= 500:
+                            raise ValidationError("最多导入 500 行。")
+                        if not any(x is not None for x in row):
+                            continue
+
+                        def cell(v):
+                            if isinstance(v, datetime):
+                                return (
+                                    v.date().isoformat()
+                                    if v.time() == time.min
+                                    else v.isoformat()
+                                )
+                            if isinstance(v, (date, time)):
+                                return v.isoformat()
+                            return "" if v is None else str(v).strip()
+
+                        records.append([cell(v) for v in row])
+                finally:
+                    wb.close()
+            else:
+                parsed = csv.reader(io.StringIO(raw.decode("utf-8-sig")))
+                header = next(parsed, [])
+                records = []
+                for i, row in enumerate(parsed):
+                    if i >= 500:
+                        raise ValidationError("最多导入 500 行。")
+                    if not any(v.strip() for v in row):
+                        continue
+                    records.append(row)
+            header = [
+                ALIASES.get(str(v).strip(), str(v).strip()) if v is not None else ""
+                for v in header
+            ]
+            while header and not header[-1]:
+                header.pop()
+            if len(set(header)) != len(header):
+                raise ValidationError("表头重复，请勿同时填写同义列。")
+            if not {"room", "title"} <= set(header) or not (
+                "period" in header or {"start", "end"} <= set(header)
+            ):
+                raise ValidationError(
+                    "缺少教室、课程名称或节次/起止时间列，请下载模板。"
+                )
+            recurring = "date" not in header
+            if recurring and not (
+                {"weekday"} <= set(header)
+                and ("weeks" in header or {"week_start", "week_end"} <= set(header))
+            ):
+                raise ValidationError("学期课表还需星期和周次（或起始周、结束周）。")
+            result = []
+            for number, values in enumerate(records, 2):
+                while len(values) > len(header) and not values[-1]:
+                    values.pop()
+                if len(values) != len(header):
+                    raise ValueError(f"第 {number} 行列数与表头不一致")
+                row = {k: str(v).strip() for k, v in zip(header, values)}
+                if not 1 <= len(row["room"]) <= 40 or not 1 <= len(row["title"]) <= 100:
+                    raise ValueError(f"第 {number} 行教室或课程名称为空/过长")
+                start, end = course_times(row)
+                if not time(0) <= start < end <= time(23, 59):
+                    raise ValueError(f"第 {number} 行起止时间无效")
+                teacher = row.get("teacher", "")
+                if len(teacher) > 60:
+                    raise ValueError("任课教师名称过长")
+                extra = {"room": row["room"], "room_meta": metadata(row)}
+                if not recurring:
+                    day = date.fromisoformat(row["date"])
+                    if not term.starts_on <= day <= term.ends_on:
+                        raise ValueError(f"第 {number} 行不在本学期范围")
+                    result.append(
+                        {
+                            **extra,
+                            "title": row["title"],
+                            "teacher": teacher,
+                            "start_at": timezone.make_aware(
+                                datetime.combine(day, start)
+                            ),
+                            "end_at": timezone.make_aware(datetime.combine(day, end)),
+                        }
+                    )
+                    continue
+                weekday = parse_weekday(row["weekday"])
+                if not 1 <= weekday <= 7:
+                    raise ValueError(f"第 {number} 行星期无效")
+                weeks, parity = (
+                    week_spec(row["weeks"])
+                    if row.get("weeks")
+                    else (
+                        set(range(int(row["week_start"]), int(row["week_end"]) + 1)),
+                        "all",
+                    )
+                )
+                if not weeks or min(weeks) < 1 or max(weeks) > 30:
+                    raise ValueError("周次须为 1–30")
+                pattern = {
+                    "每周": "all",
+                    "单周": "odd",
+                    "双周": "even",
+                    "单": "odd",
+                    "双": "even",
+                }.get(
+                    row.get("week_pattern", ""), row.get("week_pattern", "") or parity
+                )
+                if pattern not in ("all", "odd", "even") or (
+                    parity != "all" and pattern != parity
+                ):
+                    raise ValueError("单双周标记冲突或无效")
+                anchor = (
+                    date.fromisoformat(row["term_start"])
+                    if row.get("term_start")
+                    else term.week_one_monday
+                )
+                if anchor != term.week_one_monday:
+                    raise ValueError("首周日期与管理员的学期设置不一致")
+                excluded = [
+                    date.fromisoformat(x.strip()).isoformat()
+                    for x in re.split("[;；]", row.get("excluded_dates", ""))
+                    if x.strip()
+                ]
+                excluded += [
+                    (anchor + timedelta(weeks=w - 1, days=weekday - 1)).isoformat()
+                    for w in range(min(weeks), max(weeks) + 1)
+                    if w not in weeks
+                ]
+                result.append(
+                    {
+                        **extra,
+                        "rule": {
+                            "title": row["title"],
+                            "teacher": teacher,
+                            "term_start": anchor,
+                            "week_start": min(weeks),
+                            "week_end": max(weeks),
+                            "week_pattern": pattern,
+                            "weekday": weekday,
+                            "start": start,
+                            "end": end,
+                            "excluded_dates": sorted(set(excluded)),
+                        },
+                    }
+                )
+            if not result:
+                raise ValidationError("没有课程数据。")
+            return result
+        except (
+            UnicodeDecodeError,
+            csv.Error,
+            zipfile.BadZipFile,
+            KeyError,
+            OSError,
+            ValueError,
+            ParseError,
+            DefusedXmlException,
+            InvalidFileException,
+        ) as exc:
+            raise ValidationError(f"课表格式错误：{exc}") from exc
