@@ -6,20 +6,19 @@ from .models import AuditEvent, Booking, Room, User
 @admin.register(User)
 class SchoolUserAdmin(UserAdmin):
     fieldsets = UserAdmin.fieldsets + (
-        ("学校信息", {"fields": ("display_name", "department", "role")}),
+        ("学校信息", {"fields": ("display_name", "department")}),
     )
     add_fieldsets = UserAdmin.add_fieldsets + (
-        ("学校信息", {"fields": ("display_name", "department", "role")}),
+        ("学校信息", {"fields": ("display_name", "department", "is_staff")}),
     )
     list_display = (
         "username",
         "display_name",
-        "role",
         "department",
         "is_staff",
         "is_active",
     )
-    list_filter = ("role", "is_staff", "is_active", "department")
+    list_filter = ("is_staff", "is_active", "department")
 
 
 @admin.register(Room)

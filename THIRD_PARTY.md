@@ -11,7 +11,7 @@
 - [RESMAN](https://github.com/krichdevs/RESMAN)
 - [RoomFlow](https://github.com/IWKMS99/RoomFlow)
 
-本仓库没有下载、复制、合并这些项目的源码、图片、商标或数据库。报告内建议不是对本系统功能的完整承诺，具体已实现范围以 README 与测试为准。若以后引入上游代码，应先核查其实际版本和许可证，并保留相应版权声明。
+本次查阅了 classroombookings 与 MRBS 的 README，参考学校年课表、按区域/房间管理的组织方式。本仓库没有复制、合并这些项目的源码、图片、商标或数据库。报告内建议不是对本系统功能的完整承诺，具体已实现范围以 README 与测试为准。若以后引入上游代码，应先核查其实际版本和许可证，并保留相应版权声明。
 
 ## 实际运行依赖
 
@@ -26,6 +26,8 @@
 | packaging | https://github.com/pypa/packaging | Apache-2.0 OR BSD-2-Clause |
 | mysqlclient | https://github.com/PyMySQL/mysqlclient | GPL-2.0-or-later |
 | psycopg（可选） | https://www.psycopg.org/ | LGPL-3.0-or-later（附上游例外） |
+| openpyxl / et_xmlfile | https://openpyxl.readthedocs.io/ | MIT |
+| defusedxml | https://github.com/tiran/defusedxml | PSF-2.0 |
 | typing_extensions（可选） | https://github.com/python/typing_extensions | PSF-2.0 |
 
 Python、Debian 基础镜像、MariaDB 客户端库、可选 MySQL 服务镜像另有各自组件许可证。分发容器镜像时，保留其许可证及适用的源码获取义务；本仓库的源码许可证不替代第三方许可证。仓库自有源码采用 GPL-3.0-or-later。

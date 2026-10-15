@@ -1,33 +1,65 @@
 from datetime import timedelta
-import hashlib
 import secrets
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.contrib.auth.hashers import make_password, check_password
+from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 from .models import AuditEvent, Booking, Room
 
+_DUMMY_PASSWORD_HASH = make_password(secrets.token_urlsafe(32))
+
 
 def accessible_rooms(user):
-    if not user.is_authenticated:
-        return Room.objects.filter(department="")
-    if user.is_superuser:
-        return Room.objects.all()
-    scope = Q(department="")
-    if user.department:
-        scope |= Q(department=user.department)
-    return Room.objects.filter(scope)
+    return Room.objects.all()
 
 
 def managed_rooms(user):
     if not user.is_authenticated:
         return Room.objects.none()
-    if user.is_superuser:
+    if user.is_staff:
         return Room.objects.all()
-    if user.is_staff and user.department:
-        return Room.objects.filter(department=user.department)
     return Room.objects.none()
+
+
+def can_view_details(user):
+    return user.is_authenticated and user.is_staff
+
+
+def guest_owns(request, booking):
+    grant = request.session.get("booking_grant", {})
+    return (
+        booking.applicant_id is None
+        and grant.get("pk") == booking.pk
+        and grant.get("version") == booking.credential_version
+        and grant.get("until", 0) > timezone.now().timestamp()
+    )
+
+
+def grant_guest(request, booking):
+    request.session.cycle_key()
+    request.session["booking_grant"] = {
+        "pk": booking.pk,
+        "version": booking.credential_version,
+        "until": (timezone.now() + timedelta(minutes=15)).timestamp(),
+    }
+
+
+def verify_guest(booking, student_id, password):
+    # Always perform a real password hash check, including unknown/legacy records.
+    hashed = (
+        booking.edit_password_hash
+        if booking and booking.edit_password_hash
+        else _DUMMY_PASSWORD_HASH
+    )
+    matched = check_password(password, hashed)
+    return bool(
+        booking
+        and booking.applicant_id is None
+        and matched
+        and secrets.compare_digest(booking.student_id, student_id.strip())
+    )
 
 
 def validate_interval(room, start_at, end_at, participants, *, course=False):
@@ -63,6 +95,9 @@ def check_overlap(room, start, end, exclude=None):
         occupied = occupied.exclude(pk=exclude)
     if occupied.exists():
         raise ValidationError("此时段已有教学占用或预约（含待审批），请更换时间。")
+    from .timetable import check_rule_conflicts
+
+    check_rule_conflicts(room, start, end, exclude)
 
 
 @transaction.atomic
@@ -70,6 +105,8 @@ def create_booking(
     user, room_id, *, title, start_at, end_at, participants, student=None
 ):
     # Every create/review/cancel/import takes the same room lock first.
+    if user.is_authenticated and not user.is_staff:
+        raise PermissionDenied
     room = Room.objects.select_for_update().get(pk=room_id)
     if not accessible_rooms(user).filter(pk=room.pk).exists():
         raise PermissionDenied
@@ -78,7 +115,6 @@ def create_booking(
         raise ValidationError("请填写 1–100 字的预约用途。")
     validate_interval(room, start_at, end_at, participants)
     check_overlap(room, start_at, end_at)
-    is_teacher = user.is_authenticated and (user.role == "teacher" or user.is_staff)
     code = ""
     extra = {}
     if not user.is_authenticated:
@@ -100,9 +136,10 @@ def create_booking(
         }
         if any(len(student[k]) > limit for k, limit in limits.items()):
             raise ValidationError("学生信息超过允许长度。")
-        code = secrets.token_urlsafe(32)
+        password = student.get("edit_password", "")
+        validate_password(password)
         extra = {k: student[k].strip() for k in limits}
-        extra["lookup_hash"] = hashlib.sha256(code.encode()).hexdigest()
+        extra["edit_password_hash"] = make_password(password)
     booking = Booking.objects.create(
         room=room,
         applicant=user if user.is_authenticated else None,
@@ -110,13 +147,13 @@ def create_booking(
         start_at=start_at,
         end_at=end_at,
         participants=participants,
-        status="approved" if is_teacher else "pending",
+        status="approved",
         **extra,
     )
     AuditEvent.objects.create(
         booking=booking,
         actor=user if user.is_authenticated else None,
-        action="教师直接预约" if is_teacher else "提交预约",
+        action="直接预约",
     )
     return booking, code
 
@@ -126,15 +163,26 @@ def decide(user, pk, decision, reason=""):
     initial = Booking.objects.retained().get(pk=pk)
     Room.objects.select_for_update().get(pk=initial.room_id)
     booking = Booking.objects.select_for_update().get(pk=pk)
+    if booking.room_id != initial.room_id:
+        raise ValidationError("教室刚被更改，请刷新后重试。")
     if not managed_rooms(user).filter(pk=booking.room_id).exists():
         raise PermissionDenied
-    if booking.status != Booking.Status.PENDING:
-        raise ValidationError("该申请已处理，请刷新页面。")
-    if decision not in (Booking.Status.APPROVED, Booking.Status.REJECTED):
+    if decision not in (
+        Booking.Status.APPROVED,
+        Booking.Status.REJECTED,
+        Booking.Status.RETURNED,
+    ):
         raise ValidationError("无效的审批动作。")
+    allowed = (
+        booking.status in ("approved", "pending")
+        if decision == "returned"
+        else booking.status == "pending"
+    )
+    if not allowed:
+        raise ValidationError("该状态不能执行此操作，请刷新页面。")
     reason = reason.strip()
-    if len(reason) > 300 or (decision == Booking.Status.REJECTED and not reason):
-        raise ValidationError("驳回须填写原因，处理意见最多 300 字。")
+    if len(reason) > 300 or (decision in ("rejected", "returned") and not reason):
+        raise ValidationError("驳回 / 退回须填写原因，最多 300 字。")
     if booking.start_at <= timezone.now():
         raise ValidationError("开始时间已过，请撤销此申请。")
     if decision == Booking.Status.APPROVED:
@@ -154,10 +202,16 @@ def decide(user, pk, decision, reason=""):
 
 
 @transaction.atomic
-def cancel_booking(user, pk, reason="", *, guest_authorized=False):
+def cancel_booking(
+    user, pk, reason="", *, guest_authorized=False, expected_version=None
+):
     initial = Booking.objects.retained().get(pk=pk)
     Room.objects.select_for_update().get(pk=initial.room_id)
     booking = Booking.objects.select_for_update().get(pk=pk)
+    if guest_authorized and expected_version != booking.credential_version:
+        raise PermissionDenied
+    if booking.room_id != initial.room_id:
+        raise ValidationError("教室刚被更改，请刷新后重试。")
     is_manager = managed_rooms(user).filter(pk=booking.room_id).exists()
     is_owner = (user.is_authenticated and booking.applicant_id == user.pk) or (
         not booking.applicant_id and guest_authorized
@@ -189,7 +243,103 @@ def cancel_booking(user, pk, reason="", *, guest_authorized=False):
 
 
 @transaction.atomic
+def edit_booking(
+    user,
+    pk,
+    *,
+    room_id,
+    title,
+    start_at,
+    end_at,
+    participants,
+    student=None,
+    guest_authorized=False,
+    reason="",
+    expected_version=None,
+):
+    initial = Booking.objects.retained().get(pk=pk)
+    locked = {
+        r.pk: r
+        for r in Room.objects.select_for_update()
+        .filter(pk__in=sorted({initial.room_id, room_id}))
+        .order_by("pk")
+    }
+    booking = Booking.objects.select_for_update().get(pk=pk)
+    if guest_authorized and expected_version != booking.credential_version:
+        raise PermissionDenied
+    if booking.room_id != initial.room_id:
+        raise ValidationError("此记录刚被其他人修改，请刷新后重试。")
+    admin = managed_rooms(user).filter(pk=booking.room_id).exists()
+    owner = (user.is_authenticated and booking.applicant_id == user.pk) or (
+        booking.applicant_id is None and guest_authorized
+    )
+    if not admin and not owner:
+        raise PermissionDenied
+    if booking.kind == "course" and not admin:
+        raise PermissionDenied
+    if booking.status not in ("approved", "pending", "returned"):
+        raise ValidationError("已取消或驳回的记录不能编辑，请重新预约。")
+    if not admin and booking.start_at <= timezone.now() + timedelta(
+        minutes=settings.CANCEL_BEFORE_MINUTES
+    ):
+        raise ValidationError("临近使用或已开始，请联系管理员修改。")
+    room = locked.get(room_id)
+    if not room or not accessible_rooms(user).filter(pk=room_id).exists():
+        raise PermissionDenied
+    if not title.strip() or len(title) > 100:
+        raise ValidationError("用途须为 1–100 字。")
+    if admin and (not reason.strip() or len(reason) > 300):
+        raise ValidationError("管理员修改须填写原因（最多 300 字）。")
+    validate_interval(
+        room, start_at, end_at, participants, course=booking.kind == "course"
+    )
+    check_overlap(room, start_at, end_at, exclude=pk)
+    # Keep a masked operation note: snapshots containing student PII are unnecessary.
+    changed = [
+        f"{booking.room.name} {timezone.localtime(booking.start_at):%m-%d %H:%M} → {room.name} {timezone.localtime(start_at):%m-%d %H:%M}"
+    ]
+    (
+        booking.room,
+        booking.title,
+        booking.start_at,
+        booking.end_at,
+        booking.participants,
+    ) = room, title.strip(), start_at, end_at, participants
+    if student is not None and booking.applicant_id is None:
+        for name, limit in {
+            "student_name": 60,
+            "student_id": 40,
+            "student_department": 80,
+            "student_contact": 100,
+        }.items():
+            value = student.get(name, "").strip()
+            if not value or len(value) > limit:
+                raise ValidationError("请完整填写长度有效的学生信息。")
+            setattr(booking, name, value)
+        new_password = student.get("edit_password", "")
+        if new_password:
+            validate_password(new_password)
+            booking.edit_password_hash = make_password(new_password)
+        booking.credential_version += 1
+        # Revoke old lookup capabilities when identity information changes.
+        booking.lookup_hash = None
+    booking.status, booking.reason = "approved", reason.strip() if admin else ""
+    booking.save()
+    AuditEvent.objects.create(
+        booking=booking,
+        actor=user if user.is_authenticated else None,
+        action="管理员编辑" if admin else "本人修改",
+        note=(reason + "；" + changed[0])[:300],
+    )
+    return booking
+
+
+@transaction.atomic
 def import_course_rows(user, rows, *, dry_run):
+    from .timetable import import_timetable
+
+    if any("rule" in row for row in rows):
+        return import_timetable(user, rows, dry_run=dry_run)
     if not user.is_staff:
         raise PermissionDenied
     names = sorted({r["room"] for r in rows})
@@ -232,6 +382,7 @@ def import_course_rows(user, rows, *, dry_run):
             end_at=row["end_at"],
             reviewed_by=user,
             reviewed_at=timezone.now(),
+            teacher_name=row.get("teacher", ""),
         )
         AuditEvent.objects.create(booking=booking, actor=user, action="导入教学占用")
         created += 1

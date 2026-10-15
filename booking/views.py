@@ -13,8 +13,9 @@ from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
-from .forms import BookingForm, CourseImportForm, StudentBookingForm
-from .models import Booking, LoginAttempt, Room
+from django.views.decorators.debug import sensitive_post_parameters
+from .forms import BookingForm, BookingEditForm, CourseImportForm, StudentBookingForm
+from .models import Booking, LoginAttempt, Room, TeachingRule
 from .services import (
     accessible_rooms,
     managed_rooms,
@@ -22,6 +23,11 @@ from .services import (
     decide,
     cancel_booking,
     import_course_rows,
+    can_view_details,
+    guest_owns,
+    grant_guest,
+    verify_guest,
+    edit_booking,
 )
 
 
@@ -50,6 +56,12 @@ def throttle(request, scope, limit=20, minutes=15, *, identity=None):
 class SchoolLoginView(LoginView):
     template_name = "registration/login.html"
     redirect_authenticated_user = True
+
+    def form_valid(self, form):
+        if not form.get_user().is_staff:
+            form.add_error(None, "此入口仅供管理员使用；普通用户无需登录。")
+            return self.form_invalid(form)
+        return super().form_valid(form)
 
     def post(self, request, *args, **kwargs):
         if not throttle(
@@ -133,6 +145,11 @@ def rooms(request):
     }
     for room in page:
         room.daily_count = counts.get(room.pk, 0)
+        room.borrowers = list(
+            occupied.filter(room=room)
+            .select_related("applicant")
+            .order_by("start_at")[:4]
+        )
     params = request.GET.copy()
     params.pop("page", None)
     return render(
@@ -152,18 +169,99 @@ def rooms(request):
             "room_count": base.count(),
             "today_count": occupied.filter(room__in=base).count(),
             "pending_count": Booking.objects.retained()
-            .filter(room__in=managed_rooms(request.user), status="pending")
+            .filter(
+                room__in=managed_rooms(request.user),
+                status="approved",
+                kind="booking",
+                end_at__gt=timezone.now(),
+            )
             .count(),
         },
     )
 
 
+def schedule(request):
+    day = selected_day(request)
+    mode = "day" if request.GET.get("view") == "day" else "week"
+    first = day if mode == "day" else day - timedelta(days=day.weekday())
+    days = [first + timedelta(days=i) for i in range(1 if mode == "day" else 7)]
+    rooms_qs = room_filters(
+        request, accessible_rooms(request.user).filter(is_active=True)
+    )
+    page = Paginator(rooms_qs, 10).get_page(request.GET.get("page"))
+    ids = [r.pk for r in page.object_list]
+    entries = list(
+        Booking.objects.occupying()
+        .filter(
+            room_id__in=ids,
+            start_at__gte=day_bounds(first)[0],
+            start_at__lt=day_bounds(days[-1])[1],
+        )
+        .select_related("applicant")
+        .order_by("start_at")
+    )
+    columns = days if mode == "week" else list(range(7, 22))
+    from .timetable import planned_entries
+
+    entries.extend(planned_entries(ids, days))
+    entries.sort(key=lambda b: b.start_at)
+    rows = []
+    for room in page:
+        cells = []
+        for column in columns:
+            if mode == "week":
+                matches = [
+                    b
+                    for b in entries
+                    if b.room_id == room.pk and timezone.localdate(b.start_at) == column
+                ]
+            else:
+                start = timezone.make_aware(datetime.combine(day, time(column)))
+                matches = [
+                    b
+                    for b in entries
+                    if b.room_id == room.pk
+                    and b.start_at < start + timedelta(hours=1)
+                    and b.end_at > start
+                ]
+            cells.append(matches)
+        rows.append({"room": room, "cells": cells})
+    params = request.GET.copy()
+    params.pop("page", None)
+    navigation = request.GET.copy()
+    navigation.pop("page", None)
+    navigation["date"] = (first - timedelta(days=len(days))).isoformat()
+    previous = navigation.urlencode()
+    navigation["date"] = (first + timedelta(days=len(days))).isoformat()
+    following = navigation.urlencode()
+    return render(
+        request,
+        "booking/schedule.html",
+        {
+            "page": page,
+            "rows": rows,
+            "columns": columns,
+            "mode": mode,
+            "day": day,
+            "first": first,
+            "last": days[-1],
+            "previous": previous,
+            "following": following,
+            "query_string": params.urlencode(),
+            "room_types": Room._meta.get_field("room_type").choices,
+        },
+    )
+
+
+@sensitive_post_parameters(
+    "edit_password", "edit_password_confirm", "student_id", "student_contact"
+)
 def room_detail(request, pk):
     room = get_object_or_404(
         accessible_rooms(request.user).filter(is_active=True), pk=pk
     )
     day = selected_day(request)
-    form_class = BookingForm if request.user.is_authenticated else StudentBookingForm
+    form_class = BookingForm if request.user.is_staff else StudentBookingForm
     form = form_class(request.POST or None, initial={"date": day, "participants": 1})
     if request.method == "POST" and form.is_valid():
         if not throttle(request, "booking", 100):
@@ -185,15 +283,15 @@ def room_detail(request, pk):
                             "student_id",
                             "student_department",
                             "student_contact",
+                            "edit_password",
                         )
                     }
-                    if not request.user.is_authenticated
+                    if not request.user.is_staff
                     else None,
                 )
-                if code:
+                if not request.user.is_staff:
+                    grant_guest(request, booking)
                     request.session["guest_booking"] = booking.pk
-                    # Short-lived, displayed once; the database stores only its hash.
-                    request.session["receipt_code"] = code
                     return redirect("receipt")
                 messages.success(
                     request,
@@ -210,7 +308,12 @@ def room_detail(request, pk):
         .filter(room=room, start_at__lt=end, end_at__gt=start)
         .order_by("start_at")
     )
-    # Never expose applicant names, purpose or contact details in the public schedule.
+    from .timetable import planned_entries
+
+    slots = sorted(
+        list(slots) + planned_entries([room.pk], [day]), key=lambda b: b.start_at
+    )
+    # Public schedule includes only names; PII stays behind per-record verification.
     return render(
         request,
         "booking/detail.html",
@@ -230,29 +333,160 @@ def receipt(request):
     booking = get_object_or_404(
         Booking.objects.retained(), pk=request.session.get("guest_booking")
     )
+    if not guest_owns(request, booking):
+        return redirect("verify_booking", pk=booking.pk)
     return render(
         request,
         "booking/receipt.html",
-        {"booking": booking, "code": request.session.pop("receipt_code", "")},
+        {"booking": booking, "owner": True},
     )
 
 
+@sensitive_post_parameters("password", "student_id")
 def lookup(request):
     if request.method == "POST":
-        if not throttle(request, "lookup", 30):
+        if not throttle(request, "lookup", 30) or not throttle(
+            request,
+            "lookup-record",
+            15,
+            identity=request.POST.get("booking_id", "")[:20],
+        ):
             messages.error(request, "查询频繁，请稍后再试。")
         else:
-            code = request.POST.get("code", "").strip()[:100]
+            pk = request.POST.get("booking_id", "")[:15]
             booking = (
-                Booking.objects.retained()
-                .filter(lookup_hash=hashlib.sha256(code.encode()).hexdigest())
-                .first()
+                Booking.objects.retained().filter(pk=int(pk)).first()
+                if pk.isdigit()
+                else None
             )
-            if booking:
+            if verify_guest(
+                booking,
+                request.POST.get("student_id", "")[:40],
+                request.POST.get("password", "")[:128],
+            ):
+                grant_guest(request, booking)
                 request.session["guest_booking"] = booking.pk
                 return redirect("receipt")
-            messages.error(request, "查询凭证无效或记录已过期。")
+            messages.error(
+                request, "预约编号、学号 / 工号或本次密码不正确，或记录已过期。"
+            )
     return render(request, "booking/lookup.html")
+
+
+@sensitive_post_parameters("password", "student_id")
+def verify_booking(request, pk):
+    booking = get_object_or_404(Booking.objects.retained(), pk=pk)
+    if can_view_details(request.user) or guest_owns(request, booking):
+        return redirect("booking_info", pk=pk)
+    if request.method == "POST":
+        if not throttle(request, "verify", 30) or not throttle(
+            request, "verify-record", 15, identity=str(pk)
+        ):
+            messages.error(request, "验证次数过多，请 15 分钟后重试。")
+        elif verify_guest(
+            booking,
+            request.POST.get("student_id", "")[:40],
+            request.POST.get("password", "")[:128],
+        ):
+            grant_guest(request, booking)
+            return redirect("booking_info", pk=pk)
+        else:
+            messages.error(request, "学号 / 工号或本次预约密码不正确。")
+    return render(request, "booking/verify.html", {"booking": booking})
+
+
+def booking_info(request, pk):
+    booking = get_object_or_404(
+        Booking.objects.retained().select_related("room", "applicant"), pk=pk
+    )
+    owner = guest_owns(request, booking)
+    if not can_view_details(request.user) and not owner:
+        return redirect("verify_booking", pk=pk)
+    return render(
+        request,
+        "booking/receipt.html",
+        {"booking": booking, "owner": owner, "admin": request.user.is_staff},
+    )
+
+
+@require_POST
+def forget_guest(request):
+    request.session.pop("booking_grant", None)
+    request.session.pop("guest_booking", None)
+    return redirect("lookup")
+
+
+@sensitive_post_parameters("edit_password", "student_id", "student_contact")
+def booking_edit(request, pk):
+    booking = get_object_or_404(
+        Booking.objects.retained().select_related("room"), pk=pk
+    )
+    owner = guest_owns(request, booking)
+    if not request.user.is_staff and not owner:
+        return redirect("verify_booking", pk=pk)
+    local_start, local_end = (
+        timezone.localtime(booking.start_at),
+        timezone.localtime(booking.end_at),
+    )
+    initial = {
+        "room": booking.room_id,
+        "date": local_start.date(),
+        "start": local_start.time(),
+        "end": local_end.time(),
+        "title": booking.title,
+        "participants": booking.participants,
+    }
+    for key in ("student_name", "student_id", "student_department", "student_contact"):
+        initial[key] = getattr(booking, key)
+    form = BookingEditForm(
+        request.POST or None,
+        initial=initial,
+        rooms=accessible_rooms(request.user),
+        admin=request.user.is_staff,
+    )
+    if booking.applicant_id is not None:
+        for key in (
+            "student_name",
+            "student_id",
+            "student_department",
+            "student_contact",
+            "edit_password",
+        ):
+            form.fields.pop(key, None)
+    if request.method == "POST" and form.is_valid():
+        data = form.cleaned_data
+        try:
+            updated = edit_booking(
+                request.user,
+                pk,
+                room_id=data["room"].pk,
+                title=data["title"],
+                start_at=data["start_at"],
+                end_at=data["end_at"],
+                participants=data["participants"],
+                student={
+                    k: data.get(k, "")
+                    for k in (
+                        "student_name",
+                        "student_id",
+                        "student_department",
+                        "student_contact",
+                        "edit_password",
+                    )
+                }
+                if booking.applicant_id is None
+                else None,
+                guest_authorized=owner,
+                expected_version=booking.credential_version,
+                reason=data.get("reason", ""),
+            )
+            if owner:
+                grant_guest(request, updated)
+            messages.success(request, "修改已保存，预约已生效。")
+            return redirect("booking_info", pk=pk)
+        except ValidationError as exc:
+            form.add_error(None, exc)
+    return render(request, "booking/edit.html", {"form": form, "booking": booking})
 
 
 @login_required
@@ -278,26 +512,19 @@ def my_bookings(request):
 @require_POST
 def cancel(request, pk):
     booking = get_object_or_404(Booking.objects.retained(), pk=pk)
-    guest_authorized = (
-        request.session.get("guest_booking") == pk and booking.applicant_id is None
-    )
+    guest_authorized = guest_owns(request, booking)
     try:
         cancel_booking(
             request.user,
             pk,
             request.POST.get("reason", ""),
             guest_authorized=guest_authorized,
+            expected_version=booking.credential_version,
         )
         messages.success(request, "预约已取消，该时段已释放。")
     except ValidationError as exc:
         messages.error(request, "；".join(exc.messages))
-    return redirect(
-        "receipt"
-        if guest_authorized
-        else "review"
-        if request.user.is_staff
-        else "my_bookings"
-    )
+    return redirect("booking_info", pk=pk)
 
 
 staff_required = user_passes_test(lambda u: u.is_active and u.is_staff)
@@ -310,7 +537,7 @@ def review_queue(request):
         .filter(room__in=managed_rooms(request.user))
         .select_related("room", "applicant")
     )
-    status = request.GET.get("status", "pending")
+    status = request.GET.get("status", "approved")
     if status in Booking.Status.values:
         qs = qs.filter(status=status)
     return render(
@@ -361,7 +588,98 @@ def import_courses(request):
             }
         except ValidationError as exc:
             form.add_error(None, exc)
-    return render(request, "booking/import.html", {"form": form, "result": result})
+    return render(
+        request,
+        "booking/import.html",
+        {
+            "form": form,
+            "result": result,
+            "rules": TeachingRule.objects.select_related("room").order_by("-id")[:100],
+        },
+    )
+
+
+@staff_required
+@require_POST
+def stop_timetable(request, pk):
+    from .timetable import stop_rule
+
+    get_object_or_404(TeachingRule, pk=pk)
+    try:
+        stop_rule(request.user, pk, request.POST.get("reason", ""))
+        messages.success(request, "规则已停用，未来占用已取消。")
+    except ValidationError as exc:
+        messages.error(request, "；".join(exc.messages))
+    return redirect("import_courses")
+
+
+@staff_required
+def course_template(request):
+    recurring = request.GET.get("kind") == "semester"
+    monday = timezone.localdate() - timedelta(days=timezone.localdate().weekday())
+    header = (
+        [
+            "room",
+            "title",
+            "teacher",
+            "term_start",
+            "week_start",
+            "week_end",
+            "week_pattern",
+            "weekday",
+            "start",
+            "end",
+            "excluded_dates",
+        ]
+        if recurring
+        else ["room", "title", "date", "start", "end", "teacher"]
+    )
+    sample = (
+        [
+            "A101",
+            "高等数学",
+            "张老师",
+            monday.isoformat(),
+            1,
+            18,
+            "odd",
+            3,
+            "08:00",
+            "09:40",
+            "",
+        ]
+        if recurring
+        else [
+            "A101",
+            "高等数学",
+            (timezone.localdate() + timedelta(days=2)).isoformat(),
+            "08:00",
+            "09:40",
+            "张老师",
+        ]
+    )
+    if request.GET.get("format") == "xlsx":
+        from openpyxl import Workbook
+
+        response = HttpResponse(
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        response["Content-Disposition"] = (
+            'attachment; filename="timetable-template.xlsx"'
+        )
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(header)
+        sheet.append(sample)
+        workbook.save(response)
+        return response
+    response = HttpResponse(content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = 'attachment; filename="timetable-template.csv"'
+    response.write("\ufeff")
+    writer = csv.writer(response)
+    writer.writerow(header)
+    writer.writerow(sample)
+    return response
 
 
 def safe_csv(value):

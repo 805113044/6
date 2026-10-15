@@ -33,9 +33,9 @@ class Room(models.Model):
         "类型",
         max_length=30,
         choices=[
-            ("lecture", "多媒体教室"),
+            ("lecture", "普通 / 多媒体教室"),
             ("seminar", "研讨教室"),
-            ("lab", "实验教室"),
+            ("lab", "实验室"),
         ],
         default="lecture",
     )
@@ -46,7 +46,7 @@ class Room(models.Model):
         "所属学院 / 部门",
         max_length=80,
         blank=True,
-        help_text="留空表示全校共享；非空时仅限同部门用户及系统管理员",
+        help_text="教室归属资料，不限制普通用户借用；所有开放教室均可预约。",
     )
     is_active = models.BooleanField("开放预约", default=True)
 
@@ -75,6 +75,7 @@ class Booking(models.Model):
         APPROVED = "approved", "已批准"
         REJECTED = "rejected", "已驳回"
         CANCELLED = "cancelled", "已取消"
+        RETURNED = "returned", "已退回"
 
     class Kind(models.TextChoices):
         BOOKING = "booking", "预约"
@@ -89,11 +90,17 @@ class Booking(models.Model):
         null=True,
         blank=True,
     )
-    student_name = models.CharField("学生姓名", max_length=60, blank=True)
-    student_id = models.CharField("学号", max_length=40, blank=True)
+    student_name = models.CharField("借用人姓名", max_length=60, blank=True)
+    student_id = models.CharField("学号 / 工号", max_length=40, blank=True)
     student_department = models.CharField("学院 / 班级", max_length=80, blank=True)
     student_contact = models.CharField("联系方式", max_length=100, blank=True)
     lookup_hash = models.CharField(
+        max_length=64, unique=True, null=True, blank=True, editable=False
+    )
+    edit_password_hash = models.CharField(max_length=128, blank=True, editable=False)
+    credential_version = models.PositiveIntegerField(default=1, editable=False)
+    teacher_name = models.CharField("任课教师", max_length=60, blank=True)
+    course_key = models.CharField(
         max_length=64, unique=True, null=True, blank=True, editable=False
     )
     title = models.CharField("用途 / 课程", max_length=100)
@@ -122,6 +129,8 @@ class Booking(models.Model):
 
     @property
     def applicant_label(self):
+        if self.kind == self.Kind.COURSE:
+            return self.teacher_name or "教学安排"
         return str(self.applicant) if self.applicant_id else self.student_name
 
     class Meta:
@@ -161,3 +170,40 @@ class LoginAttempt(models.Model):
     key = models.CharField(max_length=64, primary_key=True)
     failures = models.PositiveSmallIntegerField(default=0)
     updated_at = models.DateTimeField(default=timezone.now)
+
+
+class TeachingRule(models.Model):
+    """Non-student timetable configuration; concrete occupancies roll forward."""
+
+    key = models.CharField(max_length=64, unique=True, editable=False)
+    room = models.ForeignKey(Room, on_delete=models.PROTECT)
+    title = models.CharField(max_length=100)
+    teacher_name = models.CharField(max_length=60)
+    term_start = models.DateField(help_text="第一教学周的周一")
+    week_start = models.PositiveSmallIntegerField()
+    week_end = models.PositiveSmallIntegerField()
+    week_pattern = models.CharField(
+        max_length=8, choices=[("all", "每周"), ("odd", "单周"), ("even", "双周")]
+    )
+    weekday = models.PositiveSmallIntegerField()
+    start = models.TimeField()
+    end = models.TimeField()
+    excluded_dates = models.JSONField(default=list)
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL
+    )
+
+    def occurs_on(self, day):
+        delta = (day - self.term_start).days
+        week = delta // 7 + 1
+        return (
+            delta >= 0
+            and self.week_start <= week <= self.week_end
+            and day.isoweekday() == self.weekday
+            and (
+                self.week_pattern == "all"
+                or week % 2 == (1 if self.week_pattern == "odd" else 0)
+            )
+            and day.isoformat() not in self.excluded_dates
+        )

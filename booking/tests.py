@@ -1,10 +1,11 @@
-import hashlib
 import io
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta
 from unittest import skipUnless
+from unittest.mock import patch
 from django.conf import settings
+from django.contrib.auth.hashers import check_password
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.sessions.models import Session
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -14,142 +15,293 @@ from django.db import close_old_connections, connection
 from django.test import Client, TestCase, TransactionTestCase
 from django.utils import timezone
 from .forms import CourseImportForm
-from .models import AuditEvent, Booking, Room, User
-from .services import create_booking, decide, cancel_booking, import_course_rows
+from .models import AuditEvent, Booking, Room, TeachingRule, User
+from .services import (
+    create_booking,
+    decide,
+    cancel_booking,
+    edit_booking,
+    import_course_rows,
+    verify_guest,
+)
+from .timetable import import_timetable, stop_rule, sync_timetables
+
+PASSWORD = "This-booking-only!2026"
 
 
-def interval(hour=10):
-    day = timezone.localdate() + timedelta(days=2)
-    start = timezone.make_aware(datetime.combine(day, time(hour)))
+def interval(hour=10, offset=2):
+    start = timezone.make_aware(
+        datetime.combine(timezone.localdate() + timedelta(days=offset), time(hour))
+    )
     return start, start + timedelta(hours=1)
+
+
+def student(**kwargs):
+    return {
+        "student_name": "张同学",
+        "student_id": "20260001",
+        "student_department": "计算机一班",
+        "student_contact": "student@example.test",
+        "edit_password": PASSWORD,
+        **kwargs,
+    }
 
 
 class WorkflowTests(TestCase):
     @classmethod
     def setUpTestData(cls):
-        cls.teacher = User.objects.create_user(
-            username="teacher",
-            password="test-only-long-password",
-            role="teacher",
-            department="计算机学院",
-        )
-        cls.other = User.objects.create_user(
-            username="other",
-            password="test-only-long-password",
-            role="teacher",
-            department="外语学院",
-        )
         cls.admin = User.objects.create_superuser(
-            username="administrator", password="test-only-admin-password", email=""
+            username="administrator", password="admin-test-password!2026", email=""
         )
-        cls.manager = User.objects.create_user(
-            username="manager",
-            password="test-only-long-password",
-            is_staff=True,
-            department="计算机学院",
+        cls.staff = User.objects.create_user(
+            username="staff", password="staff-test-password!2026", is_staff=True
         )
-        cls.room = Room.objects.create(name="A101", building="教学楼", capacity=60)
-        cls.private = Room.objects.create(
-            name="B101", building="教学楼", capacity=30, department="计算机学院"
+        cls.normal = User.objects.create_user(
+            username="legacy-teacher",
+            password="ordinary-test-password!2026",
+            role="teacher",
+        )
+        cls.room = Room.objects.create(
+            name="A101", building="教学楼", capacity=60, floor=1
+        )
+        cls.lab = Room.objects.create(
+            name="B201",
+            building="实验楼",
+            capacity=30,
+            floor=2,
+            room_type="lab",
+            department="理学院",
         )
 
-    def book(self, user=None, room=None, **overrides):
+    def book(self, room=None, details=None, **overrides):
         start, end = interval()
-        args = {
-            "title": "学习研讨",
-            "start_at": start,
-            "end_at": end,
-            "participants": 20,
-        }
-        args.update(overrides)
-        user = user or self.teacher
-        return create_booking(user, (room or self.room).pk, **args)
+        data = dict(
+            title="学习研讨",
+            start_at=start,
+            end_at=end,
+            participants=20,
+            student=student() if details is None else details,
+        )
+        data.update(overrides)
+        return create_booking(AnonymousUser(), (room or self.room).pk, **data)[0]
 
-    def guest(self):
-        return self.book(
-            AnonymousUser(),
-            student={
-                "student_name": "张同学",
-                "student_id": "20260001",
-                "student_department": "计算机一班",
-                "student_contact": "student@example.test",
-            },
+    def verify(self, client, booking, password=PASSWORD, identity="20260001"):
+        return client.post(
+            f"/bookings/{booking.pk}/verify/",
+            {"student_id": identity, "password": password},
         )
 
-    def test_teacher_auto_approved(self):
-        b, code = self.book()
+    def edit_data(self, booking, **overrides):
+        start, end = interval(14)
+        return dict(
+            room_id=booking.room_id,
+            title="修改后用途",
+            start_at=start,
+            end_at=end,
+            participants=5,
+            student=student(),
+            **overrides,
+        )
+
+    def test_guest_direct_booking_stores_only_password_hash(self):
+        b = self.book()
         self.assertEqual(b.status, "approved")
-        self.assertFalse(code)
+        self.assertIsNone(b.applicant)
+        self.assertTrue(check_password(PASSWORD, b.edit_password_hash))
+        self.assertNotEqual(PASSWORD, b.edit_password_hash)
+        self.assertIsNone(b.lookup_hash)
         self.assertEqual(b.events.count(), 1)
 
-    def test_guest_pending_and_hashed_lookup(self):
-        b, code = self.guest()
-        self.assertIsNone(b.applicant)
-        self.assertEqual(b.status, "pending")
-        self.assertEqual(b.lookup_hash, hashlib.sha256(code.encode()).hexdigest())
-        self.assertNotEqual(b.lookup_hash, code)
-        self.assertGreaterEqual(len(code), 40)
-        c = Client()
-        self.assertRedirects(c.post("/lookup/", {"code": code}), "/receipt/")
-        receipt = c.get("/receipt/")
-        self.assertContains(receipt, "张同学")
-        self.assertContains(receipt, "student@example.test")
-        self.assertEqual(Client().get("/receipt/").status_code, 404)
+    def test_information_and_strong_password_required(self):
+        for details in (
+            {},
+            student(student_contact=""),
+            student(edit_password="1234567890"),
+        ):
+            with (
+                self.subTest(details=list(details)),
+                self.assertRaises(ValidationError),
+            ):
+                self.book(details=details)
 
-    def test_guest_validation_requires_student_information(self):
-        with self.assertRaises(ValidationError):
-            self.book(AnonymousUser())
-
-    def test_guest_post_end_to_end_receipt_and_cancellation(self):
-        start, end = interval()
+    def test_only_admin_accounts_can_login(self):
         response = self.client.post(
-            f"/rooms/{self.room.pk}/",
-            {
-                "title": "小组活动",
-                "date": start.date(),
-                "start": "10:00",
-                "end": "11:00",
-                "participants": 5,
-                "student_name": "李同学",
-                "student_id": "00002",
-                "student_department": "一班",
-                "student_contact": "13800000000",
-                "consent": "on",
-            },
+            "/login/",
+            {"username": "legacy-teacher", "password": "ordinary-test-password!2026"},
         )
-        self.assertEqual(response.status_code, 302)
-        b = Booking.objects.get()
-        page = self.client.get("/receipt/")
-        code = page.context["code"]
-        self.assertTrue(code)
-        self.assertEqual(self.client.get("/receipt/").context["code"], "")
-        self.assertEqual(self.client.post(f"/bookings/{b.pk}/cancel/").status_code, 302)
-        b.refresh_from_db()
-        self.assertEqual(b.status, "cancelled")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("_auth_user_id", self.client.session)
+        self.assertEqual(
+            self.client.post(
+                "/login/", {"username": "staff", "password": "staff-test-password!2026"}
+            ).status_code,
+            302,
+        )
+        start, end = interval()
+        with self.assertRaises(PermissionDenied):
+            create_booking(
+                self.normal,
+                self.room.pk,
+                title="不允许普通账号",
+                start_at=start,
+                end_at=end,
+                participants=1,
+            )
 
-    def test_student_approval_rejection_and_state_transition(self):
-        b, _ = self.guest()
-        with self.assertRaises(ValidationError):
-            decide(self.admin, b.pk, "rejected")
-        decide(self.admin, b.pk, "approved", "核实通过")
-        b.refresh_from_db()
-        self.assertEqual(b.status, "approved")
-        with self.assertRaises(ValidationError):
-            decide(self.admin, b.pk, "rejected", "重复处理")
+    def test_public_names_but_not_personal_information(self):
+        b = self.book()
+        day = timezone.localdate(b.start_at)
+        for path in (
+            f"/rooms/{b.room_id}/?date={day}",
+            f"/?date={day}",
+            f"/schedule/?date={day}",
+            f"/schedule/?view=day&date={day}",
+            f"/bookings/{b.pk}/verify/",
+        ):
+            with self.subTest(path=path):
+                response = Client().get(path)
+                self.assertContains(response, "张同学")
+                for private in (
+                    "20260001",
+                    "student@example.test",
+                    "计算机一班",
+                    "学习研讨",
+                    b.edit_password_hash,
+                    PASSWORD,
+                ):
+                    self.assertNotContains(response, private)
 
-    def test_pending_and_approved_block_overlap(self):
-        self.guest()
+    def test_verification_only_grants_one_booking(self):
+        first = self.book()
+        second = self.book(
+            start_at=interval(12)[0],
+            end_at=interval(12)[1],
+            details=student(edit_password="Another-booking!2026"),
+        )
+        self.assertEqual(self.verify(self.client, first).status_code, 302)
+        self.assertContains(
+            self.client.get(f"/bookings/{first.pk}/info/"), "student@example.test"
+        )
+        self.assertEqual(
+            self.client.get(f"/bookings/{second.pk}/info/").status_code, 302
+        )
+        self.verify(self.client, second)
+        self.assertNotEqual(
+            self.client.session.get("booking_grant", {}).get("pk"), second.pk
+        )
+        self.verify(self.client, second, "Another-booking!2026")
+        self.assertEqual(self.client.session["booking_grant"]["pk"], second.pk)
+
+    def test_wrong_password_or_student_id_cannot_view(self):
+        b = self.book()
+        for identity, password in [
+            ("wrong-id", PASSWORD),
+            ("20260001", "wrong-password"),
+        ]:
+            response = self.verify(self.client, b, password, identity)
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn("booking_grant", self.client.session)
+            self.assertNotContains(response, b.student_contact)
+        self.assertFalse(verify_guest(None, "fake", PASSWORD))
+
+    def test_grant_expires_after_fifteen_minutes(self):
+        b = self.book()
+        self.verify(self.client, b)
+        grant = self.client.session["booking_grant"]
+        with patch(
+            "booking.services.timezone.now",
+            return_value=timezone.now() + timedelta(minutes=16),
+        ):
+            self.assertEqual(
+                self.client.get(f"/bookings/{b.pk}/info/").status_code, 302
+            )
+        self.assertEqual(grant["pk"], b.pk)
+
+    def test_owner_edit_and_resubmit_returned_record(self):
+        b = self.book()
+        decide(self.admin, b.pk, "returned", "请修改人数")
+        b.refresh_from_db()
+        self.assertEqual(b.status, "returned")
+        updated = edit_booking(
+            AnonymousUser(),
+            b.pk,
+            guest_authorized=True,
+            expected_version=b.credential_version,
+            **self.edit_data(b),
+        )
+        self.assertEqual(updated.status, "approved")
+        self.assertEqual(updated.title, "修改后用途")
+        self.assertEqual(updated.credential_version, 2)
+
+    def test_editing_other_record_is_forbidden(self):
+        b = self.book()
+        with self.assertRaises(PermissionDenied):
+            edit_booking(AnonymousUser(), b.pk, **self.edit_data(b))
+        self.assertEqual(
+            self.client.post(f"/bookings/{b.pk}/edit/", {}).status_code, 302
+        )
+        self.assertEqual(self.client.post(f"/bookings/{b.pk}/cancel/").status_code, 403)
+
+    def test_stale_grant_cannot_edit_or_cancel(self):
+        b = self.book()
+        edit_booking(self.admin, b.pk, reason="核实变更", **self.edit_data(b))
+        with self.assertRaises(PermissionDenied):
+            cancel_booking(
+                AnonymousUser(), b.pk, guest_authorized=True, expected_version=1
+            )
+        with self.assertRaises(PermissionDenied):
+            edit_booking(
+                AnonymousUser(),
+                b.pk,
+                guest_authorized=True,
+                expected_version=1,
+                **self.edit_data(b),
+            )
+
+    def test_password_change_revokes_previous_sessions(self):
+        b = self.book()
+        first, second = Client(), Client()
+        self.verify(first, b)
+        self.verify(second, b)
+        new_info = student(
+            edit_password="New-private-booking!2026", student_id="NEW-ID"
+        )
+        args = self.edit_data(b)
+        args["student"] = new_info
+        edit_booking(
+            AnonymousUser(), b.pk, guest_authorized=True, expected_version=1, **args
+        )
+        self.assertEqual(first.get(f"/bookings/{b.pk}/info/").status_code, 302)
+        self.assertEqual(second.get(f"/bookings/{b.pk}/info/").status_code, 302)
+        b.refresh_from_db()
+        self.assertFalse(verify_guest(b, "20260001", PASSWORD))
+        self.assertTrue(verify_guest(b, "NEW-ID", "New-private-booking!2026"))
+
+    def test_edit_conflict_rolls_back_original_booking(self):
+        b = self.book()
+        other = self.book(
+            room=self.lab, start_at=interval(14)[0], end_at=interval(14)[1]
+        )
+        args = self.edit_data(b)
+        args["room_id"] = self.lab.pk
+        with self.assertRaises(ValidationError):
+            edit_booking(
+                AnonymousUser(), b.pk, guest_authorized=True, expected_version=1, **args
+            )
+        b.refresh_from_db()
+        self.assertEqual(b.room_id, self.room.pk)
+        self.assertEqual(b.start_at, interval()[0])
+        self.assertEqual(other.status, "approved")
+
+    def test_first_submission_wins_and_adjacent_allowed(self):
+        self.book()
         start, end = interval()
         with self.assertRaises(ValidationError):
-            self.book(
-                start_at=start + timedelta(minutes=30),
-                end_at=end + timedelta(minutes=30),
-            )
-        # Adjacent bookings and another room remain usable.
+            self.book(start_at=start + timedelta(minutes=10))
         self.book(start_at=end, end_at=end + timedelta(hours=1))
-        self.book(room=self.private)
+        self.book(room=self.lab)
 
-    def test_inactive_room_capacity_duration_and_hours(self):
+    def test_capacity_hours_and_duration(self):
         start, end = interval()
         for args in (
             {"participants": 61},
@@ -165,112 +317,128 @@ class WorkflowTests(TestCase):
         with self.assertRaises(ValidationError):
             self.book()
 
-    def test_department_permissions_and_admin_boundary(self):
-        with self.assertRaises(PermissionDenied):
-            self.book(self.other, room=self.private)
-        self.assertEqual(self.client.get(f"/rooms/{self.private.pk}/").status_code, 404)
-        b, _ = self.guest()
-        with self.assertRaises(PermissionDenied):
-            decide(self.manager, b.pk, "approved")
-        self.client.force_login(self.manager)
-        self.assertRedirects(
-            self.client.get("/admin/"),
-            "/admin/login/?next=/admin/",
-            fetch_redirect_response=False,
-        )
-        self.assertEqual(
-            self.client.post(f"/review/{b.pk}/", {"decision": "approved"}).status_code,
-            404,
-        )
+    def test_admin_return_requires_reason_and_releases_time(self):
+        b = self.book()
+        with self.assertRaises(ValidationError):
+            decide(self.admin, b.pk, "returned")
+        decide(self.admin, b.pk, "returned", "用途需确认")
+        second = self.book()
+        self.assertEqual(second.status, "approved")
+        with self.assertRaises(ValidationError):
+            edit_booking(
+                AnonymousUser(),
+                b.pk,
+                guest_authorized=True,
+                expected_version=1,
+                room_id=b.room_id,
+                title=b.title,
+                start_at=b.start_at,
+                end_at=b.end_at,
+                participants=1,
+                student=student(),
+            )
 
-    def test_private_student_data_not_in_public_schedule(self):
-        b, _ = self.guest()
-        response = self.client.get(
-            f"/rooms/{self.room.pk}/?date={timezone.localdate(b.start_at).isoformat()}"
+    def test_admin_can_edit_and_view_all_records(self):
+        b = self.book()
+        self.client.force_login(self.staff)
+        self.assertContains(
+            self.client.get(f"/bookings/{b.pk}/info/"), b.student_contact
         )
-        for secret in (
-            b.student_name,
-            b.student_id,
-            b.student_contact,
-            b.title,
-            b.lookup_hash,
-        ):
-            self.assertNotContains(response, secret)
-        self.assertContains(response, "申请审批中")
+        self.assertContains(self.client.get("/review/"), b.student_id)
+        args = self.edit_data(b)
+        with self.assertRaises(ValidationError):
+            edit_booking(self.staff, b.pk, **args)
+        updated = edit_booking(self.staff, b.pk, reason="教务调整", **args)
+        self.assertEqual(updated.title, "修改后用途")
+        self.assertTrue(updated.events.filter(action="管理员编辑").exists())
 
-    def test_unauthorized_cancellation_and_csrf(self):
-        b, _ = self.guest()
-        self.assertEqual(Client().post(f"/bookings/{b.pk}/cancel/").status_code, 403)
-        csrf = Client(enforce_csrf_checks=True)
-        self.assertEqual(csrf.post(f"/bookings/{b.pk}/cancel/").status_code, 403)
-        self.assertEqual(self.client.get(f"/bookings/{b.pk}/cancel/").status_code, 405)
-
-    def test_owner_cancel_and_other_user_forbidden(self):
-        b, _ = self.book()
-        with self.assertRaises(PermissionDenied):
-            cancel_booking(self.other, b.pk)
-        cancel_booking(self.teacher, b.pk)
+    def test_cancel_requires_ownership_and_deadline(self):
+        b = self.book()
+        cancel_booking(AnonymousUser(), b.pk, guest_authorized=True, expected_version=1)
         b.refresh_from_db()
         self.assertEqual(b.status, "cancelled")
-        self.book()
-
-    def test_cancellation_deadline_and_admin_override(self):
-        b, _ = self.book()
+        b = self.book()
         b.start_at = timezone.now() + timedelta(minutes=10)
         b.save()
         with self.assertRaises(ValidationError):
-            cancel_booking(self.teacher, b.pk)
-        with self.assertRaises(ValidationError):
-            cancel_booking(self.admin, b.pk)
-        cancel_booking(self.admin, b.pk, "教学临时调整")
+            cancel_booking(
+                AnonymousUser(), b.pk, guest_authorized=True, expected_version=1
+            )
+        cancel_booking(self.admin, b.pk, "教务撤销")
 
-    def course_row(self):
-        start, end = interval()
-        return {"room": "A101", "title": "高等数学", "start_at": start, "end_at": end}
-
-    def test_course_preview_atomic_import_and_idempotency(self):
-        row = self.course_row()
-        self.assertEqual(import_course_rows(self.admin, [row], dry_run=True), (1, 0))
-        self.assertFalse(Booking.objects.exists())
-        self.assertFalse(AuditEvent.objects.exists())
-        self.assertEqual(import_course_rows(self.admin, [row], dry_run=False), (1, 0))
-        self.assertEqual(import_course_rows(self.admin, [row], dry_run=False), (0, 1))
-        with self.assertRaises(ValidationError):
-            self.book()
-
-    def test_import_conflict_rolls_back_whole_batch(self):
-        row = self.course_row()
-        other = {
-            **row,
-            "title": "重叠课程",
-            "start_at": row["start_at"] + timedelta(minutes=10),
-        }
-        with self.assertRaises(ValidationError):
-            import_course_rows(self.admin, [row, other], dry_run=False)
-        self.assertEqual(Booking.objects.count(), 0)
-
-    def test_csv_format_and_invalid_columns(self):
-        future = (timezone.localdate() + timedelta(days=3)).isoformat()
-        upload = SimpleUploadedFile(
-            "courses.csv",
-            f"room,title,date,start,end\nA101,课程,{future},08:00,09:40\n".encode(),
+    def test_guest_browser_form_and_lookup(self):
+        start, _ = interval()
+        data = dict(
+            title="浏览器测试",
+            date=start.date(),
+            start="10:00",
+            end="11:00",
+            participants=5,
+            **student(),
+            edit_password_confirm=PASSWORD,
+            consent="on",
         )
-        form = CourseImportForm({}, {"file": upload})
-        self.assertTrue(form.is_valid(), form.errors)
-        bad = SimpleUploadedFile(
-            "bad.csv", b"room,title,date,start,end\nA101,Oops,2026-01-01,08:00\n"
+        response = self.client.post(f"/rooms/{self.room.pk}/", data)
+        self.assertEqual(response.status_code, 302)
+        b = Booking.objects.get()
+        self.assertContains(self.client.get("/receipt/"), "已批准")
+        other = Client()
+        self.assertEqual(
+            other.post(
+                "/lookup/",
+                {"booking_id": b.pk, "student_id": b.student_id, "password": PASSWORD},
+            ).status_code,
+            302,
         )
-        self.assertFalse(CourseImportForm({}, {"file": bad}).is_valid())
+        self.assertContains(other.get("/receipt/"), b.student_contact)
+        self.assertEqual(other.post(f"/bookings/{b.pk}/cancel/").status_code, 302)
 
-    def test_retention_cascades_personal_information_audit_and_sessions(self):
-        b, code = self.guest()
+    def test_owner_edit_http_form(self):
+        b = self.book()
+        self.verify(self.client, b)
+        self.assertContains(
+            self.client.get(f"/bookings/{b.pk}/edit/"),
+            f'value="{timezone.localdate(b.start_at).isoformat()}"',
+        )
+        start, end = interval(15)
+        data = dict(
+            title="修改活动",
+            room=self.lab.pk,
+            date=start.date(),
+            start="15:00",
+            end="16:00",
+            participants=4,
+            **student(),
+        )
+        response = self.client.post(f"/bookings/{b.pk}/edit/", data)
+        self.assertEqual(response.status_code, 302)
+        b.refresh_from_db()
+        self.assertEqual(b.room_id, self.lab.pk)
+        self.assertContains(self.client.get(f"/bookings/{b.pk}/info/"), "修改活动")
+
+    def test_filters_and_daily_weekly_views(self):
+        b = self.book()
+        response = self.client.get("/?floor=2&room_type=lab")
+        self.assertEqual([r.pk for r in response.context["page"]], [self.lab.pk])
+        day = timezone.localdate(b.start_at)
+        response = self.client.get(f"/?date={day}&start=10:15&end=10:45")
+        self.assertNotIn(self.room.pk, [r.pk for r in response.context["page"]])
+        self.assertEqual(
+            len(self.client.get(f"/schedule/?date={day}").context["columns"]), 7
+        )
+        self.assertEqual(
+            len(self.client.get(f"/schedule/?date={day}&view=day").context["columns"]),
+            15,
+        )
+
+    def test_retention_cascades_records_and_sessions(self):
+        b = self.book()
         Booking.objects.filter(pk=b.pk).update(
             created_at=timezone.now()
             - timedelta(days=settings.RETENTION_DAYS, seconds=1)
         )
         self.assertFalse(Booking.objects.retained().exists())
-        self.client.post("/lookup/", {"code": code})
-        self.assertNotIn("guest_booking", self.client.session)
+        self.assertEqual(self.client.get(f"/bookings/{b.pk}/verify/").status_code, 404)
         Session.objects.create(
             session_key="expired",
             session_data="",
@@ -281,88 +449,340 @@ class WorkflowTests(TestCase):
         self.assertEqual(AuditEvent.objects.count(), 0)
         self.assertFalse(Session.objects.filter(pk="expired").exists())
 
-    def test_statistics_export_does_not_include_student_data(self):
-        b, _ = self.guest()
-        self.client.force_login(self.admin)
-        response = self.client.get("/reports/?export=csv")
-        self.assertEqual(response.status_code, 200)
-        text = response.content.decode()
-        self.assertIn("A101", text)
-        for private in (b.student_name, b.student_id, b.student_contact):
-            self.assertNotIn(private, text)
-
-    def test_csv_formula_injection_is_escaped(self):
+    def test_reports_private_data_and_csv_formula_escaping(self):
         from .views import safe_csv
 
-        self.assertEqual(safe_csv("  =1+1"), "'  =1+1")
-        self.assertEqual(safe_csv("A101"), "A101")
-
-    def test_report_date_range_uses_china_day_boundaries(self):
-        b, _ = self.book()
+        b = self.book()
         self.client.force_login(self.admin)
+        response = self.client.get("/reports/?export=csv")
+        for value in (b.student_id, b.student_contact, b.student_name):
+            self.assertNotIn(value, response.content.decode())
         day = timezone.localdate(b.start_at)
-        response = self.client.get(f"/reports/?from={day}&to={day}")
-        self.assertEqual(response.context["total"], 1)
-        response = self.client.get(f"/reports/?from={day + timedelta(days=1)}")
-        self.assertEqual(response.context["total"], 0)
-
-    def test_admin_login_uses_same_rate_limiter(self):
-        for _ in range(10):
-            self.client.post(
-                "/admin/login/", {"username": "missing-admin", "password": "wrong"}
-            )
         self.assertEqual(
-            self.client.post(
-                "/admin/login/", {"username": "missing-admin", "password": "wrong"}
-            ).status_code,
-            429,
+            self.client.get(f"/reports/?from={day}&to={day}").context["total"], 1
         )
-
-    def test_pages_templates_and_health(self):
-        for path in (
-            "/",
-            "/login/",
-            "/lookup/",
-            f"/rooms/{self.room.pk}/",
-            "/healthz/",
-        ):
-            with self.subTest(path=path):
-                self.assertEqual(self.client.get(path).status_code, 200)
-        self.client.force_login(self.admin)
-        for path in (
-            "/bookings/",
-            "/review/",
-            "/courses/import/",
-            "/reports/",
-            "/password/",
-            "/admin/",
-            "/admin/booking/user/",
-            "/admin/booking/room/",
-        ):
-            with self.subTest(path=path):
-                self.assertEqual(self.client.get(path).status_code, 200)
-
-    def test_rate_limit_and_privacy_headers(self):
-        for _ in range(10):
-            self.client.post("/login/", {"username": "nobody", "password": "invalid"})
         self.assertEqual(
-            self.client.post(
-                "/login/", {"username": "nobody", "password": "invalid"}
-            ).status_code,
-            429,
+            self.client.get(f"/reports/?from={day + timedelta(days=1)}").context[
+                "total"
+            ],
+            0,
         )
+        self.assertEqual(safe_csv(" =1+1"), "' =1+1")
+
+    def test_csrf_rate_limit_and_private_headers(self):
+        b = self.book()
+        self.assertEqual(
+            Client(enforce_csrf_checks=True)
+            .post(f"/bookings/{b.pk}/cancel/")
+            .status_code,
+            403,
+        )
+        self.assertEqual(self.client.get(f"/bookings/{b.pk}/cancel/").status_code, 405)
+        for _ in range(15):
+            self.verify(self.client, b, "wrong")
+        self.verify(self.client, b)
+        self.assertNotIn("booking_grant", self.client.session)
         response = self.client.get("/lookup/")
         self.assertIn("no-store", response["Cache-Control"])
         self.assertIn("frame-ancestors 'none'", response["Content-Security-Policy"])
 
+    def test_admin_and_public_pages(self):
+        for path in (
+            "/",
+            "/schedule/",
+            "/login/",
+            "/lookup/",
+            "/healthz/",
+            f"/rooms/{self.room.pk}/",
+        ):
+            self.assertEqual(self.client.get(path).status_code, 200)
+
+    def test_end_verification_revokes_access(self):
+        b = self.book()
+        self.verify(self.client, b)
+        self.client.post("/forget/")
+        self.assertEqual(self.client.get(f"/bookings/{b.pk}/info/").status_code, 302)
+        self.client.force_login(self.admin)
+        for path in (
+            "/review/",
+            "/courses/import/",
+            "/courses/template/",
+            "/courses/template/?kind=semester&format=xlsx",
+            "/reports/",
+            "/admin/",
+            "/admin/booking/user/add/",
+        ):
+            self.assertEqual(self.client.get(path).status_code, 200)
+
+
+class TimetableTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        WorkflowTests.setUpTestData.__func__(cls)
+
+    book = WorkflowTests.book
+
+    def rule_row(self, **changes):
+        monday = timezone.localdate() + timedelta(
+            days=7 - timezone.localdate().weekday()
+        )
+        rule = dict(
+            title="高等数学",
+            teacher="李老师",
+            term_start=monday,
+            week_start=1,
+            week_end=18,
+            week_pattern="odd",
+            weekday=3,
+            start=time(8),
+            end=time(9, 40),
+            excluded_dates=[],
+        )
+        rule.update(changes)
+        return {"room": self.room.name, "rule": rule}
+
+    def test_odd_even_and_excluded_dates(self):
+        row = self.rule_row()
+        first = row["rule"]["term_start"] + timedelta(days=2)
+        import_timetable(self.admin, [row], dry_run=False)
+        days = [
+            timezone.localdate(b.start_at)
+            for b in Booking.objects.filter(kind="course")
+        ]
+        self.assertIn(first, days)
+        self.assertNotIn(first + timedelta(days=7), days)
+        self.assertIn(first + timedelta(days=14), days)
+        even = self.rule_row(week_pattern="even")
+        import_timetable(self.admin, [even], dry_run=False)
+        self.assertTrue(
+            Booking.objects.filter(
+                start_at=timezone.make_aware(
+                    datetime.combine(first + timedelta(days=7), time(8))
+                )
+            ).exists()
+        )
+        rule = TeachingRule.objects.get(week_pattern="odd")
+        rule.excluded_dates = [first.isoformat()]
+        self.assertFalse(rule.occurs_on(first))
+
+    def test_import_excluded_date_has_no_occupancy(self):
+        row = self.rule_row()
+        first = row["rule"]["term_start"] + timedelta(days=2)
+        row["rule"]["excluded_dates"] = [first.isoformat()]
+        import_timetable(self.admin, [row], dry_run=False)
+        start = timezone.make_aware(datetime.combine(first, time(8)))
+        self.assertFalse(Booking.objects.filter(start_at=start).exists())
+        self.book(start_at=start, end_at=start + timedelta(hours=1))
+
+    def test_semester_preview_idempotent_and_rule_collision(self):
+        row = self.rule_row()
+        self.assertEqual(import_timetable(self.admin, [row], dry_run=True), (1, 0))
+        self.assertEqual(TeachingRule.objects.count(), 0)
+        self.assertEqual(Booking.objects.count(), 0)
+        self.assertEqual(import_timetable(self.admin, [row], dry_run=False), (1, 0))
+        self.assertEqual(import_timetable(self.admin, [row], dry_run=False), (0, 1))
+        with self.assertRaises(ValidationError):
+            import_timetable(
+                self.admin, [self.rule_row(title="重叠课程")], dry_run=False
+            )
+        self.assertEqual(TeachingRule.objects.count(), 1)
+
+    def test_unmaterialized_rules_block_first_booking(self):
+        row = self.rule_row()
+        import_timetable(self.admin, [row], dry_run=False)
+        Booking.objects.all().delete()
+        first = row["rule"]["term_start"] + timedelta(days=2)
+        start = timezone.make_aware(datetime.combine(first, time(8)))
+        with self.assertRaises(ValidationError):
+            self.book(start_at=start, end_at=start + timedelta(hours=1))
+
+    def test_stopping_rule_releases_future_and_does_not_regenerate(self):
+        import_timetable(self.admin, [self.rule_row()], dry_run=False)
+        rule = TeachingRule.objects.get()
+        stop_rule(self.admin, rule.pk, "调课")
+        sync_timetables()
+        self.assertFalse(Booking.objects.occupying().exists())
+        self.assertTrue(Booking.objects.filter(status="cancelled").exists())
+
+    def test_edited_occurrence_is_not_regenerated(self):
+        import_timetable(self.admin, [self.rule_row()], dry_run=False)
+        b = Booking.objects.order_by("start_at").first()
+        edit_booking(
+            self.admin,
+            b.pk,
+            room_id=b.room_id,
+            title="课程调整",
+            start_at=b.start_at + timedelta(hours=3),
+            end_at=b.end_at + timedelta(hours=3),
+            participants=1,
+            reason="调课",
+        )
+        count = Booking.objects.count()
+        sync_timetables()
+        self.assertEqual(Booking.objects.count(), count)
+
+    def test_rule_survives_reservation_retention_and_rolls_forward(self):
+        import_timetable(self.admin, [self.rule_row(week_pattern="all")], dry_run=False)
+        future = timezone.now() + timedelta(days=65)
+        with patch("django.utils.timezone.now", return_value=future):
+            call_command("purge_expired", stdout=io.StringIO())
+            sync_timetables()
+            self.assertEqual(TeachingRule.objects.count(), 1)
+            self.assertTrue(Booking.objects.filter(start_at__gt=future).exists())
+            self.assertFalse(
+                Booking.objects.filter(
+                    created_at__lte=future - timedelta(days=settings.RETENTION_DAYS)
+                ).exists()
+            )
+
+    def test_date_import_preview_atomicity_and_duplicate(self):
+        start, end = interval()
+        row = dict(
+            room=self.room.name,
+            title="课程",
+            start_at=start,
+            end_at=end,
+            teacher="王老师",
+        )
+        self.assertEqual(import_course_rows(self.admin, [row], dry_run=True), (1, 0))
+        self.assertEqual(Booking.objects.count(), 0)
+        self.assertEqual(import_course_rows(self.admin, [row], dry_run=False), (1, 0))
+        self.assertEqual(import_course_rows(self.admin, [row], dry_run=False), (0, 1))
+        with self.assertRaises(ValidationError):
+            import_course_rows(
+                self.admin, [{**row, "title": "冲突课程"}], dry_run=False
+            )
+        self.assertEqual(Booking.objects.count(), 1)
+
+    def test_semester_csv_and_excel_parsing(self):
+        from openpyxl import Workbook
+
+        monday = self.rule_row()["rule"]["term_start"].isoformat()
+        header = [
+            "room",
+            "title",
+            "teacher",
+            "term_start",
+            "week_start",
+            "week_end",
+            "week_pattern",
+            "weekday",
+            "start",
+            "end",
+            "excluded_dates",
+        ]
+        row = ["A101", "课程", "教师", monday, 1, 18, "单周", 3, "08:00", "09:40", ""]
+        import csv
+
+        text = io.StringIO()
+        writer = csv.writer(text)
+        writer.writerow(header)
+        writer.writerow(row)
+        form = CourseImportForm(
+            {}, {"file": SimpleUploadedFile("t.csv", text.getvalue().encode())}
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["file"][0]["rule"]["week_pattern"], "odd")
+        wb = Workbook()
+        ws = wb.active
+        ws.append(header)
+        ws.append(row)
+        output = io.BytesIO()
+        wb.save(output)
+        form = CourseImportForm(
+            {}, {"file": SimpleUploadedFile("t.xlsx", output.getvalue())}
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        broken = CourseImportForm(
+            {}, {"file": SimpleUploadedFile("bad.xlsx", b"not a workbook")}
+        )
+        self.assertFalse(broken.is_valid())
+
+    def test_bad_weekday_and_missing_columns_rejected(self):
+        monday = self.rule_row()["rule"]["term_start"].isoformat()
+        for text in (
+            f"room,title,teacher,term_start,week_start,week_end,week_pattern,weekday,start,end,excluded_dates\nA101,C,T,{monday},1,18,odd,9,08:00,09:00,\n",
+            "room,title,date,start,end\nA101,Oops,2026-01-01,08:00\n",
+        ):
+            form = CourseImportForm(
+                {}, {"file": SimpleUploadedFile("t.csv", text.encode())}
+            )
+            self.assertFalse(form.is_valid())
+
+    def test_later_semester_week_is_visible_without_retaining_booking_rows(self):
+        row = self.rule_row(week_pattern="all")
+        import_timetable(self.admin, [row], dry_run=False)
+        day = row["rule"]["term_start"] + timedelta(weeks=10, days=2)
+        self.assertFalse(
+            Booking.objects.filter(
+                start_at__gte=timezone.make_aware(datetime.combine(day, time.min))
+            ).exists()
+        )
+        self.assertContains(self.client.get(f"/schedule/?date={day}"), "李老师")
+        self.assertContains(
+            self.client.get(f"/rooms/{self.room.pk}/?date={day}"), "李老师"
+        )
+
 
 @skipUnless(
     connection.vendor in ("mysql", "postgresql"),
-    "SQLite 不提供所需的行级锁，生产数据库上执行并发测试",
+    "生产数据库上验证行级锁；SQLite 不支持",
 )
 class ConcurrencyTests(TransactionTestCase):
-    def test_simultaneous_submissions_only_one_succeeds(self):
-        teacher = User.objects.create_user(username="concurrent", role="teacher")
+    def test_move_and_new_booking_cannot_claim_same_slot(self):
+        room_a = Room.objects.create(name="MOVE-A", building="教学楼", capacity=20)
+        room_b = Room.objects.create(name="MOVE-B", building="教学楼", capacity=20)
+        start, end = interval()
+        original, _ = create_booking(
+            AnonymousUser(),
+            room_a.pk,
+            title="原预约",
+            start_at=start,
+            end_at=end,
+            participants=2,
+            student=student(),
+        )
+        gate = threading.Barrier(2)
+
+        def act(action):
+            close_old_connections()
+            try:
+                gate.wait(timeout=10)
+                if action == "move":
+                    edit_booking(
+                        AnonymousUser(),
+                        original.pk,
+                        room_id=room_b.pk,
+                        title="换教室",
+                        start_at=start,
+                        end_at=end,
+                        participants=2,
+                        student=student(),
+                        guest_authorized=True,
+                        expected_version=1,
+                    )
+                else:
+                    create_booking(
+                        AnonymousUser(),
+                        room_b.pk,
+                        title="新预约",
+                        start_at=start,
+                        end_at=end,
+                        participants=2,
+                        student=student(),
+                    )
+                return "success"
+            except ValidationError:
+                return "conflict"
+            finally:
+                close_old_connections()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(act, ["move", "new"]))
+        self.assertCountEqual(results, ["success", "conflict"])
+        self.assertEqual(Booking.objects.occupying().filter(room=room_b).count(), 1)
+
+    def test_simultaneous_guest_submissions_only_one_wins(self):
         room = Room.objects.create(name="R1", building="教学楼", capacity=20)
         start, end = interval()
         gate = threading.Barrier(2)
@@ -370,15 +790,15 @@ class ConcurrencyTests(TransactionTestCase):
         def submit(_):
             close_old_connections()
             try:
-                user = User.objects.get(pk=teacher.pk)
                 gate.wait(timeout=10)
                 create_booking(
-                    user,
+                    AnonymousUser(),
                     room.pk,
-                    title="并发测试",
+                    title="并发预约",
                     start_at=start,
                     end_at=end,
                     participants=2,
+                    student=student(),
                 )
                 return "created"
             except ValidationError:

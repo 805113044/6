@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block content %}<div class="narrow wide"><div class="eyebrow">EDIT RESERVATION</div><h1>修改预约 #{{ booking.pk }}</h1><p class="muted">保存时会重新检查教室容量、时间与冲突。被退回的预约修改成功后重新占用所选时段。</p><section class="panel"><form method="post" class="stack-form">{% csrf_token %}{{ form.as_p }}<button class="button full">保存修改并占用时段 →</button></form></section></div>{% endblock %}
