@@ -1,0 +1,47 @@
+name: classroom-booking
+x-app: &app
+  image: classroom-booking:local
+  build: .
+  env_file: .env
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  pids_limit: 100
+  mem_limit: 384m
+  cpus: 0.75
+  networks: [classroom]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  web:
+    <<: *app
+    ports:
+      - "127.0.0.1:18080:8000"
+    healthcheck:
+      test: ["CMD", "python", "deploy/check_health.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  retention:
+    <<: *app
+    command: ["python", "manage.py", "run_retention"]
+    mem_limit: 192m
+    cpus: 0.25
+    healthcheck:
+      test: ["CMD", "python", "deploy/check_retention.py"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  classroom:
+    driver: bridge

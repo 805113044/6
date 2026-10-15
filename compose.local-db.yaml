@@ -1,0 +1,36 @@
+# Optional dedicated MySQL container, completely separate from the main site's DB.
+# Use together with compose.yaml; remove this file from the command for TencentDB.
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD for local-db}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci", "--skip-log-bin"]
+    volumes:
+      - classroom_mysql:/var/lib/mysql
+    networks: [classroom]
+    mem_limit: 640m
+    cpus: 0.75
+    pids_limit: 150
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+  web:
+    depends_on:
+      db: {condition: service_healthy}
+  retention:
+    depends_on:
+      db: {condition: service_healthy}
+
+volumes:
+  classroom_mysql:

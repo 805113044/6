@@ -1,0 +1,36 @@
+name: Validate classroom booking
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  mysql:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-only-password
+          MYSQL_DATABASE: classroom_ci
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=20
+    env:
+      DEBUG: "true"
+      DB_ENGINE: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      DB_NAME: classroom_ci
+      DB_USER: root
+      DB_PASSWORD: ci-only-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config default-libmysqlclient-dev
+      - run: pip install -r requirements-mysql.txt
+      - run: python manage.py collectstatic --noinput
+      - run: python manage.py makemigrations --check --dry-run
+      - run: python manage.py test -v 2
