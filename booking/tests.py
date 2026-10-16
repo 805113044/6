@@ -390,13 +390,14 @@ class WorkflowTests(TestCase):
         self.assertEqual(updated.title, "修改后用途")
         self.assertTrue(updated.events.filter(action="管理员编辑").exists())
 
-    def test_cancel_requires_ownership_and_deadline(self):
+    def test_cancel_requires_ownership_and_not_ended(self):
         b = self.book()
         cancel_booking(AnonymousUser(), b.pk, guest_authorized=True, expected_version=1)
         b.refresh_from_db()
         self.assertEqual(b.status, "cancelled")
         b = self.book()
-        b.start_at = timezone.now() + timedelta(minutes=10)
+        b.start_at = timezone.now() - timedelta(hours=2)
+        b.end_at = timezone.now() - timedelta(minutes=1)
         b.save()
         with self.assertRaises(ValidationError):
             cancel_booking(

@@ -101,6 +101,9 @@ class Booking(models.Model):
         max_length=64, unique=True, null=True, blank=True, editable=False
     )
     edit_password_hash = models.CharField(max_length=128, blank=True, editable=False)
+    credential_tag = models.CharField(
+        max_length=64, blank=True, default="", db_index=True, editable=False
+    )
     credential_version = models.PositiveIntegerField(default=1, editable=False)
     teacher_name = models.CharField("任课教师", max_length=60, blank=True)
     course_key = models.CharField(

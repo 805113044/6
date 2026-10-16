@@ -16,4 +16,4 @@ Use the existing checkout in this isolated task; do not create Git worktrees unl
 - Lock the term before room locks on create/edit/import. School configuration updates use the same term lock. Do not move existing future bookings by silently changing period clocks.
 - Excel import must create missing rooms atomically, including preview rollback. Keep unknown capacity/floor NULL. Read the first worksheet and accept supported Chinese column aliases.
 - Single-date official courses also need durable teaching configuration; never let reservation TTL drop future course occupancy. Include ongoing classes when materializing.
-- Separate desktop tables and phone date/period cards must remain functional.
+- Desktop and phone share the same day/week table with fixed headers, period clocks and horizontal/vertical scrolling. Ongoing free periods can be booked immediately; owners can edit/cancel until the period ends.

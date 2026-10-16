@@ -11,3 +11,16 @@ document.querySelectorAll('[data-copy]').forEach(button => {
     catch { status.textContent = ' 请手动选中凭证并复制'; }
   });
 });
+
+document.querySelectorAll('.schedule-filters').forEach(filters => {
+  if (window.matchMedia('(max-width: 800px)').matches) filters.open = false;
+});
+
+// Keep the selected day visible inside the shared, horizontally scrollable grid.
+document.querySelectorAll('.schedule-scroll').forEach(viewport => {
+  const selected = viewport.querySelector('thead .selected-date');
+  const roomHeader = viewport.querySelector('thead th');
+  if (!selected || !roomHeader) return;
+  const left = selected.getBoundingClientRect().left - viewport.getBoundingClientRect().left;
+  viewport.scrollLeft += Math.max(0, left - roomHeader.offsetWidth - 1);
+});

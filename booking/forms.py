@@ -7,9 +7,11 @@ from xml.etree.ElementTree import ParseError
 from defusedxml.common import DefusedXmlException
 from openpyxl.utils.exceptions import InvalidFileException
 from django import forms
+from django.contrib.auth.forms import UserCreationForm
+from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.utils import timezone
-from .models import BorrowPeriod, Room
+from .models import BorrowPeriod, Room, User
 from .school import term_settings
 
 
@@ -27,6 +29,12 @@ class BookingForm(forms.Form):
         label="借用节次", queryset=BorrowPeriod.objects.all(), empty_label="请选择节次"
     )
     participants = forms.IntegerField(label="使用人数", min_value=1, max_value=2000)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["period"].label_from_instance = lambda p: (
+            f"{p}（{p.start:%H:%M}–{p.end:%H:%M}）"
+        )
 
     def clean(self):
         data = super().clean()
@@ -139,6 +147,40 @@ class RoomForm(forms.ModelForm):
             "department",
             "is_active",
         ]
+
+
+class AdministratorCreateForm(UserCreationForm):
+    class Meta(UserCreationForm.Meta):
+        model = User
+        fields = ("username", "display_name", "department")
+
+
+class AdministratorEditForm(forms.ModelForm):
+    password1 = forms.CharField(
+        label="重设密码（留空保留）",
+        required=False,
+        max_length=128,
+        widget=forms.PasswordInput,
+    )
+    password2 = forms.CharField(
+        label="再次输入新密码",
+        required=False,
+        max_length=128,
+        widget=forms.PasswordInput,
+    )
+
+    class Meta:
+        model = User
+        fields = ("display_name", "department", "is_active")
+
+    def clean(self):
+        data = super().clean()
+        password = data.get("password1", "")
+        if password != data.get("password2", ""):
+            self.add_error("password2", "两次密码不一致。")
+        if password:
+            validate_password(password, self.instance)
+        return data
 
 
 ALIASES = {

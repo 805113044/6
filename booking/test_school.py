@@ -406,10 +406,19 @@ class LegacyCourseMigrationTests(TransactionTestCase):
         original_created = b.created_at
         executor = MigrationExecutor(connection)
         executor.migrate([("booking", "0007_keep_legacy_scheduled_courses")])
-        b = Booking.objects.get(pk=b.pk)
-        self.assertTrue(b.course_key)
-        self.assertEqual(b.created_at, original_created)
-        self.assertEqual(
-            TeachingRule.objects.filter(room_id=room.pk, title="原有正式课表").count(),
-            1,
-        )
+        migrated = executor.loader.project_state(
+            [("booking", "0007_keep_legacy_scheduled_courses")]
+        ).apps
+        try:
+            b = migrated.get_model("booking", "Booking").objects.get(pk=b.pk)
+            self.assertTrue(b.course_key)
+            self.assertEqual(b.created_at, original_created)
+            self.assertEqual(
+                migrated.get_model("booking", "TeachingRule")
+                .objects.filter(room_id=room.pk, title="原有正式课表")
+                .count(),
+                1,
+            )
+        finally:
+            latest = MigrationExecutor(connection)
+            latest.migrate(latest.loader.graph.leaf_nodes())

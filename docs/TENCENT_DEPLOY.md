@@ -95,7 +95,7 @@ docker compose exec web python deploy/check_health.py
 docker compose exec retention python deploy/check_retention.py
 ```
 
-健康检查包含实际数据库查询。不要把“容器运行中”作为应用就绪的唯一依据。生产首次不运行 `seed_demo`，管理员之后在后台录入学校真实教室。`createsuperuser` 会交互询问用户名、邮箱、密码，不提供默认账号。
+健康检查包含实际数据库查询。不要把“容器运行中”作为应用就绪的唯一依据。生产首次不运行 `seed_demo`；可先设置学期、直接导入 Excel 自动创建真实教室，或手动创建。`createsuperuser` 会交互询问用户名、邮箱、密码，不提供默认账号。此账号为系统负责人，登录“管理中心 → 管理员账号”可创建多个独立管理员，日常管理员无需共享负责人账号。
 
 部署检查预期保留 `security.W005` 与 `security.W021` 两条建议：本项目只对当前预约域名设置 HSTS，不设置 `includeSubDomains` 或申请整个域名树的浏览器预加载。它们不阻止部署；其他警告须逐项排查，不应一概忽略。
 
@@ -142,3 +142,12 @@ sudo systemctl reload nginx
 - 如需停止：在项目目录执行 `docker compose stop web retention`；不停止主站服务，不删除主站网络/卷。
 
 交付环境仅测试代码与容器，不会自动修改腾讯云 DNS、证书、线上数据库或主站。实际子域名/数据库地址/密码须由部署人员在服务器配置。
+
+
+## 12. 本地化运行与升级本版本
+
+平台不调用第三方业务 API，不需要额外 SaaS 订阅、在线 AI 或 CDN；所有应用、静态资源和业务数据由学校自己部署。常规源码构建会下载开源依赖，可在其他同架构机器预构建后上传镜像，腾讯云运行时无需连接软件仓库。详见 [本地化与离线部署](LOCAL_ONLY.md)。服务器、域名、数据库原有费用按腾讯云计费。
+
+从旧版升级需先按既有保留策略做可恢复备份，保留服务器 `.env`，更新代码后构建镜像、执行 `python manage.py migrate --noinput`（本版增加 0008 凭据查询索引），再重启 `web` / `retention` 并验证健康。若用独立 MySQL 容器，所有命令均带上 `compose.local-db.yaml`；不要遗漏该文件或删除数据卷。已有预约无需提供原密码即可升级，查询时自动兼容旧哈希。
+
+`CANCEL_BEFORE_MINUTES` 已不再使用；用户可在节次结束前修改/取消，支持临时借用。管理员登录落在 `/manage/`。负责人账号的停用/删除不在日常管理员表单中提供，避免误锁死系统。

@@ -5,7 +5,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.views import LoginView
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db import connection, transaction
 from django.db.models import Count, Q
@@ -26,6 +26,8 @@ from .services import (
     can_view_details,
     guest_owns,
     grant_guest,
+    grant_guests,
+    lookup_guest_bookings,
     verify_guest,
     edit_booking,
 )
@@ -296,7 +298,6 @@ def room_detail(request, pk):
             "cells": cells,
             "form": form,
             "advance_days": settings.BOOKING_ADVANCE_DAYS,
-            "cancel_minutes": settings.CANCEL_BEFORE_MINUTES,
             "term": term,
             "week_number": term.week_number(day) if term else None,
         },
@@ -319,32 +320,47 @@ def receipt(request):
 @sensitive_post_parameters("password", "student_id")
 def lookup(request):
     if request.method == "POST":
-        if not throttle(request, "lookup", 30) or not throttle(
+        if not throttle(request, "lookup", 300) or not throttle(
             request,
-            "lookup-record",
+            "lookup-identity",
             15,
-            identity=request.POST.get("booking_id", "")[:20],
+            identity=request.POST.get("student_id", "")[:40].strip(),
         ):
             messages.error(request, "查询频繁，请稍后再试。")
         else:
             pk = request.POST.get("booking_id", "")[:15]
-            booking = (
-                Booking.objects.retained().filter(pk=int(pk)).first()
-                if pk.isdigit()
-                else None
-            )
-            if verify_guest(
-                booking,
-                request.POST.get("student_id", "")[:40],
-                request.POST.get("password", "")[:128],
-            ):
-                grant_guest(request, booking)
-                request.session["guest_booking"] = booking.pk
-                return redirect("receipt")
+            identity = request.POST.get("student_id", "")[:40].strip()
+            password = request.POST.get("password", "")[:128]
+            if pk:
+                # Keep old saved forms compatible; the new interface omits ID.
+                booking = (
+                    Booking.objects.retained().filter(pk=int(pk)).first()
+                    if pk.isascii() and pk.isdecimal()
+                    else None
+                )
+                if verify_guest(booking, identity, password):
+                    grant_guest(request, booking)
+                    request.session["guest_booking"] = booking.pk
+                    return redirect("receipt")
+            else:
+                matched = lookup_guest_bookings(identity, password)
+                if matched:
+                    grant_guests(request, matched)
+                    return redirect("lookup")
             messages.error(
-                request, "预约编号、学号 / 工号或本次密码不正确，或记录已过期。"
+                request, "学号 / 工号或本次密码不正确，或没有尚在保留期内的匹配记录。"
             )
-    return render(request, "booking/lookup.html")
+    grants = request.session.get("booking_grants", {})
+    ids = [int(pk) for pk in grants if pk.isdigit()]
+    bookings = [
+        b
+        for b in Booking.objects.retained()
+        .filter(pk__in=ids)
+        .select_related("room", "period")
+        .order_by("-start_at")
+        if guest_owns(request, b)
+    ]
+    return render(request, "booking/lookup.html", {"bookings": bookings})
 
 
 @sensitive_post_parameters("password", "student_id")
@@ -386,6 +402,7 @@ def booking_info(request, pk):
 @require_POST
 def forget_guest(request):
     request.session.pop("booking_grant", None)
+    request.session.pop("booking_grants", None)
     request.session.pop("guest_booking", None)
     return redirect("lookup")
 
@@ -501,6 +518,89 @@ def cancel(request, pk):
 
 
 staff_required = user_passes_test(lambda u: u.is_active and u.is_staff)
+
+
+@staff_required
+def management(request):
+    from .models import AcademicTerm, User
+
+    term = AcademicTerm.objects.filter(pk=1).first()
+    return render(
+        request,
+        "booking/management.html",
+        {
+            "room_count": Room.objects.count(),
+            "booking_count": Booking.objects.occupying()
+            .filter(kind="booking", end_at__gt=timezone.now())
+            .count(),
+            "admin_count": User.objects.filter(is_staff=True, is_active=True).count(),
+            "term": term,
+            "week_number": term.week_number(timezone.localdate()) if term else None,
+        },
+    )
+
+
+@staff_required
+def administrators(request):
+    if not request.user.is_superuser:
+        raise PermissionDenied
+    from .models import User
+
+    return render(
+        request,
+        "booking/administrators.html",
+        {"accounts": User.objects.filter(is_staff=True).order_by("username")},
+    )
+
+
+@staff_required
+@sensitive_post_parameters("password1", "password2")
+def administrator_edit(request, pk=None):
+    if not request.user.is_superuser:
+        raise PermissionDenied
+    from django.contrib.admin.models import LogEntry, ADDITION, CHANGE
+    from django.contrib.contenttypes.models import ContentType
+    from .forms import AdministratorCreateForm, AdministratorEditForm
+    from .models import User
+
+    with transaction.atomic():
+        account = (
+            get_object_or_404(User.objects.select_for_update(), pk=pk, is_staff=True)
+            if pk
+            else None
+        )
+        # Root accounts cannot be disabled or demoted in the daily manager UI.
+        if account and account.is_superuser:
+            raise PermissionDenied
+        form = (
+            AdministratorEditForm(request.POST or None, instance=account)
+            if account
+            else AdministratorCreateForm(request.POST or None)
+        )
+        if request.method == "POST" and form.is_valid():
+            target = form.save(commit=False)
+            target.is_staff = True
+            target.is_superuser = False
+            if account and form.cleaned_data.get("password1"):
+                target.set_password(form.cleaned_data["password1"])
+            target.save()
+            LogEntry.objects.create(
+                user_id=request.user.pk,
+                content_type=ContentType.objects.get_for_model(User),
+                object_id=target.pk,
+                object_repr=str(target),
+                action_flag=CHANGE if account else ADDITION,
+                change_message="更新管理员资料、启用状态或密码"
+                if account
+                else "创建管理员",
+            )
+            messages.success(
+                request, "管理员账号已保存；每位管理员使用自己的账号登录。"
+            )
+            return redirect("administrators")
+    return render(
+        request, "booking/administrator_edit.html", {"form": form, "account": account}
+    )
 
 
 @staff_required

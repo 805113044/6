@@ -159,13 +159,15 @@ def availability(rooms, day, periods, *, include_entries=True):
                 term
                 and term.booking_open
                 and term.starts_on <= day <= term.ends_on
-                and now < a <= now + timedelta(days=settings.BOOKING_ADVANCE_DAYS)
+                and b > now
+                and a <= now + timedelta(days=settings.BOOKING_ADVANCE_DAYS)
             )
             cells.append(
                 {
                     "period": p,
                     "entries": overlaps if include_entries else [],
                     "free": open_slot and room.is_active and not overlaps,
+                    "ongoing": a <= now < b,
                 }
             )
         result[room.pk] = cells

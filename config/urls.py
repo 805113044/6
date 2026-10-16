@@ -7,8 +7,8 @@ from booking import views
 admin.site.has_permission = lambda request: (
     request.user.is_active and request.user.is_superuser
 )
-admin.site.site_header = "知室 · 系统管理"
-admin.site.site_title = "知室管理"
+admin.site.site_header = "教室借用平台 · 系统管理"
+admin.site.site_title = "教室借用平台"
 admin.site.login = views.SchoolLoginView.as_view()
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -30,6 +30,18 @@ urlpatterns = [
     ),
     path("", views.rooms, name="rooms"),
     path("schedule/", views.schedule, name="schedule"),
+    path("manage/", views.management, name="management"),
+    path("manage/administrators/", views.administrators, name="administrators"),
+    path(
+        "manage/administrators/new/",
+        views.administrator_edit,
+        name="administrator_create",
+    ),
+    path(
+        "manage/administrators/<int:pk>/",
+        views.administrator_edit,
+        name="administrator_edit",
+    ),
     path("manage/school/", views.school_settings, name="school_settings"),
     path("manage/rooms/", views.manage_rooms, name="manage_rooms"),
     path("manage/rooms/new/", views.room_edit, name="room_create"),

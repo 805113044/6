@@ -1,11 +1,13 @@
 from datetime import timedelta
 import secrets
+import json
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.contrib.auth.hashers import make_password, check_password
 from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 from django.utils import timezone
+from django.utils.crypto import salted_hmac
 from .models import AuditEvent, Booking, Room
 from .school import term_settings, period_for, check_term_date, ensure_import_rooms
 
@@ -29,7 +31,9 @@ def can_view_details(user):
 
 
 def guest_owns(request, booking):
-    grant = request.session.get("booking_grant", {})
+    grant = request.session.get("booking_grants", {}).get(str(booking.pk))
+    if grant is None:
+        grant = request.session.get("booking_grant", {})
     return (
         booking.applicant_id is None
         and grant.get("pk") == booking.pk
@@ -39,12 +43,59 @@ def guest_owns(request, booking):
 
 
 def grant_guest(request, booking):
+    grant_guests(request, [booking])
+
+
+def grant_guests(request, bookings):
     request.session.cycle_key()
-    request.session["booking_grant"] = {
-        "pk": booking.pk,
-        "version": booking.credential_version,
-        "until": (timezone.now() + timedelta(minutes=15)).timestamp(),
+    grants = {
+        pk: grant
+        for pk, grant in request.session.get("booking_grants", {}).items()
+        if grant.get("until", 0) > timezone.now().timestamp()
     }
+    until = (timezone.now() + timedelta(minutes=15)).timestamp()
+    for booking in bookings:
+        grant = {
+            "pk": booking.pk,
+            "version": booking.credential_version,
+            "until": until,
+        }
+        grants[str(booking.pk)] = grant
+        request.session["booking_grant"] = grant
+    request.session["booking_grants"] = grants
+
+
+def credential_tag(student_id, password):
+    # SECRET_KEY is a server-side pepper, never stored in the database. This
+    # index enables credential-pair lookup without weakening the PBKDF2 hash.
+    value = json.dumps([student_id.strip(), password], ensure_ascii=False)
+    return salted_hmac("booking.lookup.v1", value, algorithm="sha256").hexdigest()
+
+
+def lookup_guest_bookings(student_id, password):
+    tag = credential_tag(student_id, password)
+    qs = (
+        Booking.objects.retained()
+        .filter(applicant__isnull=True, kind="booking", student_id=student_id.strip())
+        .select_related("room", "period")
+    )
+    indexed = list(qs.filter(credential_tag=tag))
+    # One PBKDF2 check authenticates the pair; other rows carry the same
+    # server-keyed tag. Neither raw password nor tag is sent to the client.
+    matches = (
+        indexed
+        if verify_guest(indexed[0] if indexed else None, student_id, password)
+        else []
+    )
+    # Compatibility with bookings made before this index existed, or whose ID
+    # an administrator changed without knowing the password. Lazily backfill.
+    for booking in qs.filter(credential_tag=""):
+        if verify_guest(booking, student_id, password):
+            Booking.objects.filter(
+                pk=booking.pk, credential_version=booking.credential_version
+            ).update(credential_tag=tag)
+            matches.append(booking)
+    return sorted(matches, key=lambda b: b.start_at, reverse=True)
 
 
 def verify_guest(booking, student_id, password):
@@ -59,7 +110,9 @@ def verify_guest(booking, student_id, password):
         booking
         and booking.applicant_id is None
         and matched
-        and secrets.compare_digest(booking.student_id, student_id.strip())
+        and secrets.compare_digest(
+            booking.student_id.encode(), student_id.strip().encode()
+        )
     )
 
 
@@ -70,11 +123,11 @@ def validate_interval(room, start_at, end_at, participants, *, course=False):
         raise ValidationError("该教室暂未开放。")
     term = term_settings()
     check_term_date(term, start.date(), course=course)
-    if start_at <= now or (
+    if end_at <= now or (
         not course and start_at > now + timedelta(days=settings.BOOKING_ADVANCE_DAYS)
     ):
         raise ValidationError(
-            f"请选择未来 {settings.BOOKING_ADVANCE_DAYS} 天内的时间。"
+            f"请选择尚未结束、且在未来 {settings.BOOKING_ADVANCE_DAYS} 天内的节次；当天可立即借用。"
         )
     if end_at <= start_at or start.date() != end.date():
         raise ValidationError("结束时间须晚于开始时间，且必须为同一天。")
@@ -139,6 +192,7 @@ def create_booking(
         validate_password(password)
         extra = {k: student[k].strip() for k in limits}
         extra["edit_password_hash"] = make_password(password)
+        extra["credential_tag"] = credential_tag(extra["student_id"], password)
     booking = Booking.objects.create(
         room=room,
         applicant=user if user.is_authenticated else None,
@@ -184,8 +238,8 @@ def decide(user, pk, decision, reason=""):
     reason = reason.strip()
     if len(reason) > 300 or (decision in ("rejected", "returned") and not reason):
         raise ValidationError("驳回 / 退回须填写原因，最多 300 字。")
-    if booking.start_at <= timezone.now():
-        raise ValidationError("开始时间已过，请撤销此申请。")
+    if booking.end_at <= timezone.now():
+        raise ValidationError("使用时间已结束，请撤销此申请。")
     if decision == Booking.Status.APPROVED:
         validate_interval(
             booking.room, booking.start_at, booking.end_at, booking.participants
@@ -221,12 +275,8 @@ def cancel_booking(
         raise PermissionDenied
     if booking.status not in (Booking.Status.PENDING, Booking.Status.APPROVED):
         raise ValidationError("此记录已结束处理，不能再次取消。")
-    if not is_manager and booking.start_at <= timezone.now() + timedelta(
-        minutes=settings.CANCEL_BEFORE_MINUTES
-    ):
-        raise ValidationError(
-            f"距开始不足 {settings.CANCEL_BEFORE_MINUTES} 分钟，请联系管理员。"
-        )
+    if not is_manager and booking.end_at <= timezone.now():
+        raise ValidationError("使用时间已结束，请联系管理员处理。")
     reason = reason.strip()
     if len(reason) > 300 or (
         is_manager and booking.applicant_id != user.pk and not reason
@@ -281,10 +331,8 @@ def edit_booking(
         raise PermissionDenied
     if booking.status not in ("approved", "pending", "returned"):
         raise ValidationError("已取消或驳回的记录不能编辑，请重新预约。")
-    if not admin and booking.start_at <= timezone.now() + timedelta(
-        minutes=settings.CANCEL_BEFORE_MINUTES
-    ):
-        raise ValidationError("临近使用或已开始，请联系管理员修改。")
+    if not admin and booking.end_at <= timezone.now():
+        raise ValidationError("使用时间已结束，请联系管理员修改。")
     room = locked.get(room_id)
     if not room or not accessible_rooms(user).filter(pk=room_id).exists():
         raise PermissionDenied
@@ -314,6 +362,7 @@ def edit_booking(
         booking.participants,
     ) = room, title.strip(), start_at, end_at, participants
     if student is not None and booking.applicant_id is None:
+        old_student_id = booking.student_id
         for name, limit in {
             "student_name": 60,
             "student_id": 40,
@@ -328,6 +377,9 @@ def edit_booking(
         if new_password:
             validate_password(new_password)
             booking.edit_password_hash = make_password(new_password)
+            booking.credential_tag = credential_tag(booking.student_id, new_password)
+        elif booking.student_id != old_student_id:
+            booking.credential_tag = ""
         booking.credential_version += 1
         # Revoke old lookup capabilities when identity information changes.
         booking.lookup_hash = None
