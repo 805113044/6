@@ -18,6 +18,8 @@ import sys
 
 APP = Path("/opt/classroom-booking/app")
 DOMAIN = "jy.zlmmxwl.com"
+DB_HOST = "10.1.4.15"
+DB_PORT = 3306
 DB_NAME = "classroom_booking"
 DB_USER = "classroom_app"
 
@@ -79,16 +81,14 @@ def main():
     subprocess.run(["docker", "image", "inspect", "classroom-booking:local"],
                    stdout=subprocess.DEVNULL, check=True)
 
-    host = input("腾讯云 MySQL 内网地址：").strip()
-    port_text = input("端口 [3306]：").strip() or "3306"
+    host = DB_HOST
+    port = DB_PORT
+    print(f"数据库内网地址：{host}:{port}")
     admin_user = input("数据库管理账号 [root]：").strip() or "root"
     admin_password = getpass.getpass("数据库管理账号密码（输入时不显示）：")
     if not host or not admin_user or not admin_password:
         raise SystemExit("连接信息不能为空。")
     try:
-        port = int(port_text)
-        if not 1 <= port <= 65535:
-            raise ValueError("invalid port")
         address = ipaddress.IPv4Address(socket.gethostbyname(host))
     except (ValueError, OSError) as exc:
         raise SystemExit(f"数据库地址或端口不正确：{exc}") from exc
