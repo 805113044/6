@@ -14,3 +14,69 @@
 @media(max-width:480px){.management-grid{grid-template-columns:1fr}.inline-form{flex-wrap:wrap}.inline-form input{min-width:0}}
 .calendar-table thead th.selected-date{background:#e4efde;color:#376740;font-weight:600}
 .schedule-filters>summary{cursor:pointer;font-size:13px;color:var(--green);font-weight:600}.schedule-filters>summary span{font-size:10px;font-weight:400;color:var(--muted);margin-left:12px}.schedule-filters[open]>summary{margin-bottom:20px}
+
+/* Date columns, period rows: every room stays visible in each time slot. */
+.schedule-matrix{min-width:1770px;width:100%}
+.schedule-matrix-day{min-width:620px}
+.schedule-matrix th:first-child{width:138px;min-width:138px}
+.schedule-matrix tbody th:first-child{background:#f7f9f5;vertical-align:top}
+.schedule-matrix .matrix-period{display:block;color:#315945;font-size:16px;line-height:1.35}
+.schedule-matrix tbody th small{margin-top:5px}
+.schedule-matrix .period-time{font-size:11px;color:#6b7e70;white-space:nowrap;margin-top:7px}
+.schedule-matrix .matrix-cell{padding:12px;vertical-align:top;background:#fff;min-width:220px}
+.matrix-cell-head{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px;padding:0 2px 8px;border-bottom:1px solid #e8eee7;font-size:11px;color:#8a9b8d}
+.matrix-cell-head strong{color:#4e705a;font-weight:600}
+.matrix-room-list{display:grid;gap:7px}
+.matrix-room{display:flex;flex-wrap:wrap;align-items:center;gap:4px 7px;min-width:0;min-height:37px;padding:8px 10px;border:1px solid #e2eae0;border-radius:7px;background:#f9fbf8;line-height:1.4}
+.matrix-room-name{font-size:12px;font-weight:650;color:#315943;overflow-wrap:anywhere}
+.matrix-room-free{border-color:#d6e7d5;background:#f4faf1}
+.matrix-room-busy{border-color:#eadfce;background:#fffbf3}
+.matrix-room-closed{background:#f7f8f7;color:#9aa49b}
+.matrix-borrower{font-size:11px;font-weight:600;color:#946236;overflow-wrap:anywhere}
+.matrix-borrower:before{content:'·';padding-right:7px;color:#c6a982}
+.matrix-borrower small{display:inline-block;font-size:9px;font-weight:400;margin-left:5px;color:#7b8e9b}
+.matrix-course{color:#5d8194}
+.matrix-course:before{color:#a4bdc9}
+.matrix-book,.matrix-closed-label{margin-left:auto;font-size:10px;white-space:nowrap}
+.matrix-book{color:#34734d;font-weight:600}
+.matrix-closed-label{color:#9aa49b}
+.schedule-matrix-day .matrix-room-list{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+
+/* Desk and chair registration uses the same layout on desktop and phone. */
+.furniture-heading-icon{width:66px;height:66px;border-radius:18px;background:#e9f3e9;color:#3f7758;display:grid;place-items:center;font-size:31px;box-shadow:inset 0 0 0 1px #d7e7d8}
+.furniture-layout{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(230px,.72fr);gap:24px;align-items:start}
+.furniture-form-panel{background:linear-gradient(180deg,#fff 70%,#f9fcf8);box-shadow:0 10px 28px #28503a09}
+.furniture-person-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 18px}
+.furniture-person-grid label{min-width:0}
+.furniture-items-heading{display:flex;justify-content:space-between;align-items:center;gap:15px;margin:26px 0 13px}
+.furniture-items-heading h3{font-size:17px;margin:0 0 4px}
+.furniture-items-heading p{font-size:11px;color:var(--muted);margin:0}
+.furniture-item-list{display:grid;gap:9px}
+.furniture-item-row{display:grid;grid-template-columns:minmax(0,1fr) 110px 40px;gap:9px;align-items:end;padding:10px 12px;background:#f7faf6;border:1px solid #e3ede0;border-radius:9px}
+.furniture-item-row label{min-width:0}
+.furniture-item-row input{margin-top:5px}
+.furniture-remove{width:40px;height:41px;border:1px solid #dce7d8;border-radius:6px;background:#fff;color:#7d9382;font-size:22px;cursor:pointer}
+.furniture-remove:hover{color:#a14c42;border-color:#e9c9c2}
+.furniture-consent{margin:22px 0 5px;padding:12px 14px;background:#f0f6ee;border-radius:7px}
+.furniture-consent label{display:flex;align-items:flex-start;gap:8px;line-height:1.5}
+.furniture-consent input{margin:2px 0 0;flex:none}
+.furniture-privacy{font-size:11px;color:#829285;line-height:1.7;margin:17px 0 0}
+.furniture-guide{background:#f1f7ef;border-color:#e0ebdc}
+.furniture-guide-icon{display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:#dcebd9;color:#467352;font-size:14px;margin:4px 0 11px}
+.furniture-guide h2{font-size:15px;margin:0 0 6px}
+.furniture-guide p{font-size:12px;color:#6b806f;line-height:1.8;margin:0 0 23px}
+.furniture-guide p:last-child{margin-bottom:0}
+.furniture-search{display:flex;align-items:end;gap:11px;flex-wrap:wrap;margin:17px 0}
+.furniture-search label:first-child{flex:1 1 220px}
+.furniture-search label:nth-child(2){flex:0 1 150px}
+.furniture-table-wrap{overflow:auto;border:1px solid #e5ede2;border-radius:8px}
+.furniture-table{width:100%;min-width:810px;border-collapse:collapse;font-size:12px}
+.furniture-table th,.furniture-table td{padding:13px 14px;text-align:left;vertical-align:top;border-bottom:1px solid #edf1eb}
+.furniture-table th{background:#f4f8f2;color:#607663;font-size:11px;white-space:nowrap}
+.furniture-table tr:last-child td{border-bottom:0}
+.furniture-table td strong{color:#344e40}
+.furniture-table td small{display:block;color:#829185;margin-top:4px}
+.furniture-table td form{margin-top:9px}
+.furniture-item-chip{display:inline-block;padding:4px 7px;margin:0 4px 5px 0;border-radius:5px;background:#eaf2e6;color:#4a7453;font-size:11px}
+@media(max-width:900px){.furniture-layout{grid-template-columns:1fr}.furniture-guide{display:block}.furniture-guide-icon{float:left;margin:0 10px 8px 0}.furniture-guide h2{padding-top:5px}.furniture-guide p{clear:both;margin-bottom:17px}.schedule-matrix-day{min-width:520px}}
+@media(max-width:600px){.furniture-person-grid{grid-template-columns:1fr;gap:9px}.furniture-item-row{grid-template-columns:minmax(0,1fr) 86px 36px;padding:9px;gap:6px}.furniture-remove{width:36px}.furniture-items-heading{align-items:flex-start;flex-wrap:wrap}.furniture-heading-icon{display:none}.schedule-matrix-day{min-width:460px}.schedule-matrix th:first-child{width:105px;min-width:105px}.schedule-matrix .matrix-cell{min-width:210px;padding:9px}.schedule-matrix-day .matrix-room-list{grid-template-columns:1fr}.matrix-room{padding:7px 8px}}

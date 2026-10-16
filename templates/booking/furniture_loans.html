@@ -1,0 +1,50 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-heading furniture-heading">
+  <div>
+    <div class="eyebrow">CAMPUS EQUIPMENT · 桌椅登记</div>
+    <h1>桌椅借用</h1>
+    <p>填写借用人和物品清单，可按需要增加项目。登记后由管理员核对和管理归还。</p>
+  </div>
+  <span class="furniture-heading-icon" aria-hidden="true">▤</span>
+</div>
+<div class="furniture-layout">
+  <section class="panel furniture-form-panel">
+    <div class="section-line"><h2>填写借用登记</h2><span>带 * 的信息请填写完整</span></div>
+    <form method="post" data-furniture-form class="stack-form">
+      {% csrf_token %}
+      {{ form.non_field_errors }}
+      <div class="furniture-person-grid">
+        <label>姓名 *{{ form.borrower_name }}{{ form.borrower_name.errors }}</label>
+        <label>学号 / 工号 *{{ form.student_id }}{{ form.student_id.errors }}</label>
+        <label>电话 *{{ form.phone }}{{ form.phone.errors }}</label>
+        <label>借用用途（选填）{{ form.purpose }}{{ form.purpose.errors }}</label>
+      </div>
+      <div class="furniture-items-heading"><div><h3>借用物品</h3><p>例如桌子 2 张、椅子 6 把；每项填写名称和数量。</p></div><button type="button" class="button secondary small" data-add-loan-item>＋ 添加项目</button></div>
+      <div data-loan-items class="furniture-item-list">
+        {% for name, quantity in item_rows %}
+        <div class="furniture-item-row">
+          <label>物品名称<input name="item_name" list="furniture-item-suggestions" maxlength="60" placeholder="例如：桌子" value="{{ name }}"></label>
+          <label>数量<input name="item_quantity" type="number" min="1" max="500" step="1" inputmode="numeric" placeholder="件数" value="{{ quantity }}"></label>
+          <button type="button" class="furniture-remove" data-remove-loan-item aria-label="删除这一项">×</button>
+        </div>
+        {% endfor %}
+      </div>
+      <datalist id="furniture-item-suggestions"><option value="桌子"><option value="椅子"><option value="折叠椅"><option value="讲台"></datalist>
+      <template id="loan-item-template"><div class="furniture-item-row"><label>物品名称<input name="item_name" list="furniture-item-suggestions" maxlength="60" placeholder="例如：椅子"></label><label>数量<input name="item_quantity" type="number" min="1" max="500" step="1" inputmode="numeric" placeholder="件数"></label><button type="button" class="furniture-remove" data-remove-loan-item aria-label="删除这一项">×</button></div></template>
+      <div class="furniture-consent"><label>{{ form.consent }} <span>同意将上述信息提供给管理员处理；记录按平台保留期自动删除。</span></label>{{ form.consent.errors }}</div>
+      <button class="button full" type="submit">提交借用登记 ↗</button>
+    </form>
+    <p class="furniture-privacy">姓名、电话、学号和物品明细仅管理员可查看；普通用户提交后只收到登记编号。</p>
+  </section>
+  <aside class="panel furniture-guide"><span class="furniture-guide-icon">①</span><h2>按实际数量填写</h2><p>点击“添加项目”可继续填写桌子、椅子或其他物品。每种物品一行，最多 20 种。</p><span class="furniture-guide-icon">②</span><h2>保存登记编号</h2><p>提交成功后页面会显示编号。需要修改或归还时，请凭编号联系管理员核对。</p><span class="furniture-guide-icon">③</span><h2>保护个人信息</h2><p>登记表不会向其他普通用户展示。管理员可查看登记并标记归还。</p></aside>
+</div>
+{% if user.is_staff %}
+<section class="panel furniture-management spaced-top">
+  <div class="section-line"><div><h2>桌椅登记管理</h2><p class="muted">仅管理员可见完整信息；超过平台保留期的记录会自动清理。</p></div><span>{{ page.paginator.count }} 条记录</span></div>
+  <form method="get" class="furniture-search"><label>查找姓名 / 学号 / 电话<input name="q" value="{{ request.GET.q }}" placeholder="输入关键词"></label><label>状态<select name="state"><option value="">全部</option><option value="open" {% if request.GET.state == 'open' %}selected{% endif %}>未归还</option><option value="returned" {% if request.GET.state == 'returned' %}selected{% endif %}>已归还</option></select></label><button class="button" type="submit">查找</button></form>
+  <div class="furniture-table-wrap" role="region" tabindex="0" aria-label="桌椅登记记录，可左右滚动"><table class="furniture-table"><thead><tr><th>编号 / 时间</th><th>借用人</th><th>物品与数量</th><th>用途</th><th>状态 / 操作</th></tr></thead><tbody>{% for loan in page %}<tr><td><strong>#{{ loan.pk }}</strong><small>{{ loan.created_at|date:'m/d H:i' }}</small></td><td><strong>{{ loan.borrower_name }}</strong><small>学号：{{ loan.student_id }}</small><small>电话：{{ loan.phone }}</small></td><td>{% for item in loan.items %}<span class="furniture-item-chip">{{ item.name }} × {{ item.quantity }}</span>{% endfor %}</td><td>{{ loan.purpose|default:'—' }}</td><td>{% if loan.returned_at %}<span class="badge approved">已归还</span><small>{{ loan.returned_at|date:'m/d H:i' }}</small>{% else %}<span class="badge pending">未归还</span><form method="post" action="{% url 'return_furniture_loan' loan.pk %}">{% csrf_token %}<button class="button secondary small" type="submit">标记归还</button></form>{% endif %}</td></tr>{% empty %}<tr><td colspan="5" class="empty">暂无符合条件的登记</td></tr>{% endfor %}</tbody></table></div>
+  {% if page.has_other_pages %}<nav class="pagination" aria-label="桌椅登记分页">{% if page.has_previous %}<a href="?page={{ page.previous_page_number }}&amp;q={{ request.GET.q|urlencode }}&amp;state={{ request.GET.state|urlencode }}">← 上一页</a>{% endif %}<span>第 {{ page.number }} / {{ page.paginator.num_pages }} 页</span>{% if page.has_next %}<a href="?page={{ page.next_page_number }}&amp;q={{ request.GET.q|urlencode }}&amp;state={{ request.GET.state|urlencode }}">下一页 →</a>{% endif %}</nav>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

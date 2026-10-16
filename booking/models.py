@@ -201,6 +201,23 @@ class LoginAttempt(models.Model):
     updated_at = models.DateTimeField(default=timezone.now)
 
 
+class FurnitureLoan(models.Model):
+    """Short-lived desk/chair checkout record; personal details stay staff-only."""
+
+    borrower_name = models.CharField("借用人姓名", max_length=60)
+    student_id = models.CharField("学号 / 工号", max_length=40)
+    phone = models.CharField("联系电话", max_length=30)
+    purpose = models.CharField("借用用途", max_length=120, blank=True)
+    items = models.JSONField("物品和数量", default=list)
+    created_at = models.DateTimeField("登记时间", default=timezone.now, db_index=True)
+    returned_at = models.DateTimeField("归还时间", null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "桌椅借用登记"
+        verbose_name_plural = "桌椅借用登记"
+
+
 class TeachingRule(models.Model):
     """Non-student timetable configuration; concrete occupancies roll forward."""
 

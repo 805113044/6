@@ -30,6 +30,12 @@ urlpatterns = [
     ),
     path("", views.rooms, name="rooms"),
     path("schedule/", views.schedule, name="schedule"),
+    path("furniture/", views.furniture_loans, name="furniture_loans"),
+    path(
+        "furniture/<int:pk>/return/",
+        views.return_furniture_loan,
+        name="return_furniture_loan",
+    ),
     path("manage/", views.management, name="management"),
     path("manage/administrators/", views.administrators, name="administrators"),
     path(

@@ -12,10 +12,16 @@ from django.db.models import Count, Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_http_methods, require_POST
 from django.views.decorators.debug import sensitive_post_parameters
-from .forms import BookingForm, BookingEditForm, CourseImportForm, StudentBookingForm
-from .models import Booking, LoginAttempt, Room, TeachingRule
+from .forms import (
+    BookingForm,
+    BookingEditForm,
+    CourseImportForm,
+    FurnitureLoanForm,
+    StudentBookingForm,
+)
+from .models import Booking, FurnitureLoan, LoginAttempt, Room, TeachingRule
 from .services import (
     accessible_rooms,
     managed_rooms,
@@ -180,18 +186,27 @@ def schedule(request):
     first = day if mode == "day" else day - timedelta(days=day.weekday())
     days = [first + timedelta(days=i) for i in range(1 if mode == "day" else 7)]
     periods = list(BorrowPeriod.objects.all())
-    page = Paginator(
-        room_filters(request, accessible_rooms(request.user).filter(is_active=True)), 10
-    ).get_page(request.GET.get("page"))
-    rooms = list(page.object_list)
+    rooms = list(
+        room_filters(request, accessible_rooms(request.user).filter(is_active=True))
+    )
     matrices = {d: availability(rooms, d, periods) for d in days}
     rows = []
-    for room in rooms:
-        if mode == "day":
-            cells = matrices[day][room.pk]
-        else:
-            cells = [{"day": d, "periods": matrices[d][room.pk]} for d in days]
-        rows.append({"room": room, "cells": cells})
+    for index, period in enumerate(periods):
+        rows.append(
+            {
+                "period": period,
+                "cells": [
+                    {
+                        "day": d,
+                        "rooms": [
+                            {"room": room, "slot": matrices[d][room.pk][index]}
+                            for room in rooms
+                        ],
+                    }
+                    for d in days
+                ],
+            }
+        )
     params = request.GET.copy()
     params.pop("page", None)
     navigation = params.copy()
@@ -204,9 +219,9 @@ def schedule(request):
         request,
         "booking/schedule.html",
         {
-            "page": page,
             "rows": rows,
-            "columns": days if mode == "week" else periods,
+            "columns": days,
+            "room_count": len(rooms),
             "mode": mode,
             "day": day,
             "first": first,
@@ -228,6 +243,55 @@ def schedule(request):
             ),
             "days": days,
         },
+    )
+
+
+@sensitive_post_parameters("phone", "student_id")
+@require_http_methods(["GET", "HEAD", "POST"])
+def furniture_loans(request):
+    form = FurnitureLoanForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        if not throttle(request, "furniture-loan", 30):
+            form.add_error(None, "登记过于频繁，请 15 分钟后再试。")
+        else:
+            data = form.cleaned_data
+            loan = FurnitureLoan.objects.create(
+                borrower_name=data["borrower_name"],
+                phone=data["phone"],
+                student_id=data["student_id"],
+                purpose=data["purpose"],
+                items=data["items"],
+            )
+            messages.success(request, f"桌椅借用登记成功，编号 {loan.pk}。")
+            return redirect("furniture_loans")
+    if request.method == "POST":
+        item_rows = list(
+            zip(request.POST.getlist("item_name"), request.POST.getlist("item_quantity"))
+        )[:20]
+    else:
+        item_rows = [("", "")]
+    if not item_rows:
+        item_rows = [("", "")]
+    page = None
+    if request.user.is_staff:
+        loans = FurnitureLoan.objects.filter(
+            created_at__gt=timezone.now() - timedelta(days=settings.RETENTION_DAYS)
+        )
+        query = request.GET.get("q", "").strip()[:60]
+        if query:
+            loans = loans.filter(
+                Q(borrower_name__icontains=query)
+                | Q(student_id__icontains=query)
+                | Q(phone__icontains=query)
+            )
+        state = request.GET.get("state", "")
+        if state in ("open", "returned"):
+            loans = loans.filter(returned_at__isnull=state == "open")
+        page = Paginator(loans, 20).get_page(request.GET.get("page"))
+    return render(
+        request,
+        "booking/furniture_loans.html",
+        {"form": form, "item_rows": item_rows, "page": page},
     )
 
 
@@ -518,6 +582,22 @@ def cancel(request, pk):
 
 
 staff_required = user_passes_test(lambda u: u.is_active and u.is_staff)
+
+
+@staff_required
+@require_POST
+def return_furniture_loan(request, pk):
+    loan = get_object_or_404(
+        FurnitureLoan.objects.filter(
+            created_at__gt=timezone.now() - timedelta(days=settings.RETENTION_DAYS)
+        ),
+        pk=pk,
+    )
+    if loan.returned_at is None:
+        loan.returned_at = timezone.now()
+        loan.save(update_fields=["returned_at"])
+        messages.success(request, f"登记 #{loan.pk} 已标记归还。")
+    return redirect("furniture_loans")
 
 
 @staff_required

@@ -462,13 +462,28 @@ class WorkflowTests(TestCase):
             f"/?date={day}&period={BorrowPeriod.objects.get(number=2).pk}"
         )
         self.assertNotIn(self.room.pk, [r.pk for r in response.context["page"]])
-        self.assertEqual(
-            len(self.client.get(f"/schedule/?date={day}").context["columns"]), 7
-        )
-        self.assertEqual(
-            len(self.client.get(f"/schedule/?date={day}&view=day").context["columns"]),
-            5,
-        )
+        week = self.client.get(f"/schedule/?date={day}")
+        self.assertEqual(len(week.context["columns"]), 7)
+        self.assertEqual(len(week.context["rows"]), 5)
+        self.assertEqual(len(week.context["rows"][0]["cells"]), 7)
+        self.assertContains(week, 'scope="row"', count=5)
+        self.assertContains(week, b.applicant_label)
+        self.assertContains(week, self.room.name)
+        self.assertContains(week, self.lab.name)
+        day_view = self.client.get(f"/schedule/?date={day}&view=day")
+        self.assertEqual(len(day_view.context["columns"]), 1)
+        self.assertEqual(len(day_view.context["rows"]), 5)
+
+    def test_schedule_shows_all_filtered_rooms_in_each_period(self):
+        extra = [
+            Room.objects.create(name=f"C{number:03}", building="新楼", floor=3)
+            for number in range(12)
+        ]
+        response = self.client.get("/schedule/?view=day&floor=3")
+        self.assertEqual(response.context["room_count"], 12)
+        self.assertEqual(len(response.context["rows"]), 5)
+        for room in extra:
+            self.assertContains(response, room.name, count=5)
 
     def test_retention_cascades_records_and_sessions(self):
         b = self.book()

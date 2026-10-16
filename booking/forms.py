@@ -79,6 +79,54 @@ class StudentBookingForm(BookingForm):
         return data
 
 
+class FurnitureLoanForm(forms.Form):
+    borrower_name = forms.CharField(label="姓名", max_length=60)
+    phone = forms.CharField(
+        label="电话", max_length=30, widget=forms.TextInput(attrs={"type": "tel"})
+    )
+    student_id = forms.CharField(label="学号 / 工号", max_length=40)
+    purpose = forms.CharField(label="借用用途", max_length=120, required=False)
+    consent = forms.BooleanField(
+        label="同意将登记信息提供给管理员处理，并在保留期内自动删除"
+    )
+
+    def clean_phone(self):
+        value = self.cleaned_data["phone"].strip()
+        if not re.fullmatch(r"[0-9+()\- ]{6,30}", value) or len(
+            re.sub(r"\D", "", value)
+        ) < 6:
+            raise ValidationError("请输入有效的联系电话。")
+        return value
+
+    def clean(self):
+        data = super().clean()
+        names = self.data.getlist("item_name")
+        quantities = self.data.getlist("item_quantity")
+        if len(names) != len(quantities) or len(names) > 20:
+            raise ValidationError("最多添加 20 种物品，每种都要填写名称和数量。")
+        items = []
+        seen = set()
+        for name, raw_quantity in zip(names, quantities):
+            name, raw_quantity = name.strip(), raw_quantity.strip()
+            if not name and not raw_quantity:
+                continue
+            if not name or len(name) > 60 or not raw_quantity.isdecimal():
+                raise ValidationError("每种物品都需要名称和整数数量。")
+            quantity = int(raw_quantity)
+            if not 1 <= quantity <= 500:
+                raise ValidationError("每种物品的数量须在 1 到 500 之间。")
+            if name.casefold() in seen:
+                raise ValidationError("同一种物品请合并为一行。")
+            seen.add(name.casefold())
+            items.append({"name": name, "quantity": quantity})
+        if not items:
+            raise ValidationError("请至少填写一种借用物品。")
+        if sum(item["quantity"] for item in items) > 2000:
+            raise ValidationError("单次登记的物品总数不能超过 2000。")
+        data["items"] = items
+        return data
+
+
 class BookingEditForm(BookingForm):
     room = forms.ModelChoiceField(label="教室", queryset=Room.objects.all())
     student_name = forms.CharField(

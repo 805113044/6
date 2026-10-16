@@ -1,5 +1,57 @@
-{% extends 'base.html' %}{% block content %}<div class="page-heading"><div><div class="eyebrow">CLASSROOM TIMETABLE</div><h1>一周空间，一眼看清</h1><p>每天五个固定节次，姓名公开显示。当天空闲节次可立即借用。</p></div><a class="button secondary" href="{% url 'rooms' %}">教室卡片 ↗</a></div>{% include 'booking/term_banner.html' %}
-<details class="panel schedule-filters" open><summary>筛选和切换视图 <span>日期 · 教学周 · 楼层 · 类型</span></summary><form method="get" class="filter-grid"><label>显示方式<select name="view"><option value="week" {% if mode == 'week' %}selected{% endif %}>周课表</option><option value="day" {% if mode == 'day' %}selected{% endif %}>单日五节表</option></select></label><label>日期<input type="date" name="date" value="{{ day|date:'Y-m-d' }}"></label><label>教室 / 楼栋<input name="q" value="{{ request.GET.q }}" placeholder="搜索"></label><label>类型<select name="room_type"><option value="">教室与实验室</option>{% for value,label in room_types %}<option value="{{ value }}" {% if request.GET.room_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><label>楼层<input name="floor" type="number" min="0" value="{{ request.GET.floor }}" placeholder="全部楼层"></label><button class="button">查看</button></form>{% if term %}<form class="inline-form spaced-top" method="get"><input type="hidden" name="view" value="{{ mode }}"><label for="jump-week">跳转教学周</label><input id="jump-week" type="number" name="week" min="{{ term.first_week }}" max="30" value="{{ week_number|default:term.first_week }}"><button class="button secondary">跳转</button></form>{% endif %}</details>
-<div class="calendar-navigation spaced-top"><a class="button secondary small" href="?{{ previous }}">← 上{% if mode == 'week' %}周{% else %}一天{% endif %}</a><strong>{{ first|date:'m月d日' }}{% if mode == 'week' %} — {{ last|date:'m月d日' }}{% endif %}</strong><a class="button secondary small" href="?{{ following }}">下{% if mode == 'week' %}周{% else %}一天{% endif %} →</a></div>
-<p class="table-hint spaced-top">↔ 左右滑动查看日期 / 节次，↕ 上下滑动查看更多教室；表头与教室名称固定。</p><div class="panel table-wrap calendar-wrap schedule-scroll desktop-calendar" tabindex="0" role="region" aria-label="教室日周课表，可上下左右滚动"><table class="calendar-table {% if mode == 'day' %}five-period-table{% endif %}"><thead><tr><th>教室</th>{% for column in columns %}<th{% if mode == 'week' and column == day %} class="selected-date" aria-current="date"{% endif %}>{% if mode == 'week' %}{{ column|date:'l' }}<small>{{ column|date:'m/d' }}</small>{% else %}{{ column }}<small>{{ column.group }} · {{ column.start|time:'H:i' }}–{{ column.end|time:'H:i' }}</small>{% endif %}</th>{% endfor %}</tr></thead><tbody>{% for row in rows %}<tr><th><a href="{% url 'room_detail' row.room.pk %}?date={{ day|date:'Y-m-d' }}">{{ row.room.name }}</a><small>{{ row.room.building }} · {{ row.room.get_room_type_display }}</small></th>{% for entry in row.cells %}<td>{% if mode == 'week' %}{% for cell in entry.periods %}{% include 'booking/period_cell.html' with room=row.room day=entry.day %}{% endfor %}{% else %}{% include 'booking/period_cell.html' with cell=entry room=row.room %}{% endif %}</td>{% endfor %}</tr>{% empty %}<tr><td colspan="8" class="empty">暂无符合条件的教室</td></tr>{% endfor %}</tbody></table></div>
-{% include 'booking/pagination.html' %}{% endblock %}
+{% extends 'base.html' %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <div class="eyebrow">CLASSROOM TIMETABLE</div>
+    <h1>每一节，都看得清</h1>
+    <p>横向看日期，纵向看节次。每个格子列出全部符合筛选条件的教室和借用人。</p>
+  </div>
+  <a class="button secondary" href="{% url 'rooms' %}">教室卡片 ↗</a>
+</div>
+{% include 'booking/term_banner.html' %}
+<details class="panel schedule-filters" open>
+  <summary>筛选和切换视图 <span>日期 · 教学周 · 楼层 · 类型</span></summary>
+  <form method="get" class="filter-grid">
+    <label>显示方式<select name="view"><option value="week" {% if mode == 'week' %}selected{% endif %}>周课表</option><option value="day" {% if mode == 'day' %}selected{% endif %}>单日五节表</option></select></label>
+    <label>日期<input type="date" name="date" value="{{ day|date:'Y-m-d' }}"></label>
+    <label>教室 / 楼栋<input name="q" value="{{ request.GET.q }}" placeholder="搜索"></label>
+    <label>类型<select name="room_type"><option value="">教室与实验室</option>{% for value,label in room_types %}<option value="{{ value }}" {% if request.GET.room_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label>楼层<input name="floor" type="number" min="0" value="{{ request.GET.floor }}" placeholder="全部楼层"></label>
+    <button class="button">查看</button>
+  </form>
+  {% if term %}<form class="inline-form spaced-top" method="get"><input type="hidden" name="view" value="{{ mode }}"><label for="jump-week">跳转教学周</label><input id="jump-week" type="number" name="week" min="{{ term.first_week }}" max="30" value="{{ week_number|default:term.first_week }}"><button class="button secondary">跳转</button></form>{% endif %}
+</details>
+<div class="calendar-navigation spaced-top">
+  <a class="button secondary small" href="?{{ previous }}">← 上{% if mode == 'week' %}周{% else %}一天{% endif %}</a>
+  <strong>{{ first|date:'m月d日' }}{% if mode == 'week' %} — {{ last|date:'m月d日' }}{% endif %}</strong>
+  <a class="button secondary small" href="?{{ following }}">下{% if mode == 'week' %}周{% else %}一天{% endif %} →</a>
+</div>
+<p class="table-hint spaced-top">已显示 {{ room_count }} 间教室 · 左右滑动切换日期，上下滑动查看全部教室；日期和节次会保持可见。</p>
+<div class="panel table-wrap calendar-wrap schedule-scroll" tabindex="0" role="region" aria-label="按节次和日期排列的教室课表，可上下左右滚动">
+  <table class="calendar-table schedule-matrix {% if mode == 'day' %}schedule-matrix-day{% endif %}">
+    <thead><tr><th scope="col">节次 <small>实际时间</small></th>{% for column in columns %}<th scope="col"{% if column == day %} class="selected-date" aria-current="date"{% endif %}>{{ column|date:'l' }}<small>{{ column|date:'m/d' }}</small></th>{% endfor %}</tr></thead>
+    <tbody>
+      {% if room_count %}
+        {% for row in rows %}
+        <tr>
+          <th scope="row"><span class="matrix-period">{{ row.period }}</span><small>{{ row.period.group }}</small><span class="period-time">{{ row.period.start|time:'H:i' }}–{{ row.period.end|time:'H:i' }}</span></th>
+          {% for entry in row.cells %}
+          <td class="matrix-cell">
+            <div class="matrix-cell-head"><strong>{{ room_count }} 间教室</strong><span>{{ entry.day|date:'m/d' }}</span></div>
+            <div class="matrix-room-list">
+              {% for item in entry.rooms %}
+              <div class="matrix-room {% if item.slot.entries %}matrix-room-busy{% elif item.slot.free %}matrix-room-free{% else %}matrix-room-closed{% endif %}">
+                <a class="matrix-room-name" href="{% url 'room_detail' item.room.pk %}?date={{ entry.day|date:'Y-m-d' }}">{{ item.room.name }}</a>
+                {% for borrowed in item.slot.entries %}<span class="matrix-borrower {% if borrowed.kind == 'course' %}matrix-course{% endif %}">{{ borrowed.applicant_label }}{% if borrowed.kind == 'course' %}<small>课程</small>{% endif %}</span>{% empty %}{% if item.slot.free %}<a class="matrix-book" href="{% url 'room_detail' item.room.pk %}?date={{ entry.day|date:'Y-m-d' }}&amp;period={{ row.period.pk }}">可借用 ↗</a>{% else %}<span class="matrix-closed-label">未开放</span>{% endif %}{% endfor %}
+              </div>
+              {% endfor %}
+            </div>
+          </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      {% else %}<tr><td colspan="{{ columns|length|add:1 }}" class="empty">暂无符合条件的教室。请调整筛选条件，或请管理员先创建教室。</td></tr>{% endif %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

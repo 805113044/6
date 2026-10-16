@@ -24,3 +24,20 @@ document.querySelectorAll('.schedule-scroll').forEach(viewport => {
   const left = selected.getBoundingClientRect().left - viewport.getBoundingClientRect().left;
   viewport.scrollLeft += Math.max(0, left - roomHeader.offsetWidth - 1);
 });
+
+const furnitureForm = document.querySelector('[data-furniture-form]');
+if (furnitureForm) {
+  const rows = furnitureForm.querySelector('[data-loan-items]');
+  const template = document.getElementById('loan-item-template');
+  furnitureForm.querySelector('[data-add-loan-item]').addEventListener('click', () => {
+    if (rows.children.length >= 20) return;
+    rows.append(template.content.cloneNode(true));
+    rows.lastElementChild.querySelector('input').focus();
+  });
+  rows.addEventListener('click', event => {
+    const button = event.target.closest('[data-remove-loan-item]');
+    if (!button) return;
+    button.closest('.furniture-item-row').remove();
+    if (!rows.children.length) rows.append(template.content.cloneNode(true));
+  });
+}
