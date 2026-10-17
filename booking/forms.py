@@ -12,6 +12,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from .models import BorrowPeriod, Room, User
+from .password_policy_r16 import validate_new_password
 from .school import term_settings
 
 
@@ -58,19 +59,22 @@ class StudentBookingForm(BookingForm):
     student_contact = forms.CharField(
         label="联系方式（手机或校内邮箱）", max_length=100
     )
-    consent = forms.BooleanField(
-        label="同意公开姓名，其余信息仅本人和管理员可见；预约信息最多保留一个月（30天）"
-    )
     edit_password = forms.CharField(
         label="本次预约修改密码",
-        min_length=10,
-        max_length=128,
+        min_length=6,
+        max_length=4096,
+        strip=False,
         widget=forms.PasswordInput,
-        help_text="每笔可以不同，请自行保存。不是校园账号密码。",
+        help_text="新密码至少6位，必须含英文字母和数字；请保存好密码。不是校园账号密码。",
     )
     edit_password_confirm = forms.CharField(
-        label="再次输入本次密码", max_length=128, widget=forms.PasswordInput
+        label="再次输入本次密码", max_length=4096, strip=False, widget=forms.PasswordInput
     )
+
+    def clean_edit_password(self):
+        password = self.cleaned_data["edit_password"]
+        validate_new_password(password)
+        return password
 
     def clean(self):
         data = super().clean()
@@ -80,15 +84,33 @@ class StudentBookingForm(BookingForm):
 
 
 class FurnitureLoanForm(forms.Form):
+    loan_password = forms.CharField(
+        label="桌椅借用密码", min_length=6, max_length=4096,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+        help_text="自行设置密码；归还时只需学号和该密码。请妥善保存。",
+    )
+    loan_password_confirm = forms.CharField(
+        label="确认借用密码", min_length=6, max_length=4096,
+        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}),
+    )
     borrower_name = forms.CharField(label="姓名", max_length=60)
     phone = forms.CharField(
         label="电话", max_length=30, widget=forms.TextInput(attrs={"type": "tel"})
     )
     student_id = forms.CharField(label="学号 / 工号", max_length=40)
     purpose = forms.CharField(label="借用用途", max_length=120, required=False)
-    consent = forms.BooleanField(
-        label="同意将登记信息提供给管理员处理，并在保留期内自动删除"
-    )
+
+    def clean_loan_password(self):
+        password = self.cleaned_data["loan_password"]
+        validate_new_password(password)
+        return password
+
+    def clean_loan_password_confirm(self):
+        a = self.cleaned_data.get("loan_password")
+        b = self.cleaned_data.get("loan_password_confirm")
+        if a is not None and a != b:
+            raise forms.ValidationError("两次填写的桌椅借用密码不一致。")
+        return b
 
     def clean_phone(self):
         value = self.cleaned_data["phone"].strip()
@@ -101,28 +123,51 @@ class FurnitureLoanForm(forms.Form):
     def clean(self):
         data = super().clean()
         names = self.data.getlist("item_name")
+        customs = self.data.getlist("item_custom_name")
         quantities = self.data.getlist("item_quantity")
-        if len(names) != len(quantities) or len(names) > 20:
-            raise ValidationError("最多添加 20 种物品，每种都要填写名称和数量。")
+        if len(names) != len(quantities) or not 1 <= len(names) <= 20:
+            raise ValidationError("最多添加20种物品，每项都要选择物品并填写数量。")
+        if customs and len(customs) != len(names):
+            raise ValidationError("物品列表已失效，请刷新后重新选择。")
+        if not customs:
+            customs = [""] * len(names)  # old clients/R9 test forms
+        from .models import FurnitureStock
+        active = set(FurnitureStock.objects.filter(is_active=True).values_list("name", flat=True))
+        all_known = set(FurnitureStock.objects.values_list("name", flat=True))
         items = []
         seen = set()
-        for name, raw_quantity in zip(names, quantities):
-            name, raw_quantity = name.strip(), raw_quantity.strip()
-            if not name and not raw_quantity:
+        for selected, custom, raw_quantity in zip(names, customs, quantities):
+            selected, custom, raw_quantity = selected.strip(), custom.strip(), raw_quantity.strip()
+            if not selected and not raw_quantity and not custom:
                 continue
-            if not name or len(name) > 60 or not raw_quantity.isdecimal():
-                raise ValidationError("每种物品都需要名称和整数数量。")
+            if not raw_quantity.isdecimal():
+                raise ValidationError("借用数量须为整数。")
             quantity = int(raw_quantity)
             if not 1 <= quantity <= 500:
-                raise ValidationError("每种物品的数量须在 1 到 500 之间。")
+                raise ValidationError("每种物品数量须为1至500。")
+            is_other = selected == "__OTHER__"
+            if is_other:
+                if not (1 <= len(custom) <= 60) or custom == "__OTHER__":
+                    raise ValidationError("选择“其他”后，必须填写1至60字的实际物品名称。")
+                if custom in all_known or any(custom.casefold() == x.casefold() for x in all_known):
+                    raise ValidationError("该物品已有管理员库存记录，请从下拉列表选取；如已停用，请联系管理员。")
+                name = custom
+            else:
+                if selected not in active:
+                    raise ValidationError("请选择管理员当前设置的物品；没有的物品请选择“其他”。")
+                name = selected
             if name.casefold() in seen:
                 raise ValidationError("同一种物品请合并为一行。")
             seen.add(name.casefold())
-            items.append({"name": name, "quantity": quantity})
+            entry = {"name": name, "quantity": quantity}
+            if is_other:
+                # Not inventory managed; distinguish even if staff later adds the same name.
+                entry["untracked"] = True
+            items.append(entry)
         if not items:
             raise ValidationError("请至少填写一种借用物品。")
         if sum(item["quantity"] for item in items) > 2000:
-            raise ValidationError("单次登记的物品总数不能超过 2000。")
+            raise ValidationError("单次登记物品总数不能超过2000。")
         data["items"] = items
         return data
 
@@ -140,11 +185,18 @@ class BookingEditForm(BookingForm):
     edit_password = forms.CharField(
         label="更换本次密码（留空保留）",
         required=False,
-        min_length=10,
-        max_length=128,
+        min_length=6,
+        max_length=4096,
+        strip=False,
         widget=forms.PasswordInput,
     )
     reason = forms.CharField(label="管理员修改原因", required=False, max_length=300)
+
+    def clean_edit_password(self):
+        password = self.cleaned_data.get("edit_password", "")
+        if password:
+            validate_new_password(password)
+        return password
 
     def __init__(self, *args, rooms, admin=False, **kwargs):
         super().__init__(*args, **kwargs)

@@ -4,16 +4,17 @@ from django.contrib.sessions.models import Session
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
-from booking.models import Booking, FurnitureLoan, LoginAttempt
+from booking.models import Booking, FurnitureLoan, LoginAttempt, booking_retention_anchor
 
 
 def purge():
-    cutoff = timezone.now() - timedelta(days=settings.RETENTION_DAYS)
+    booking_cutoff = timezone.now() - timedelta(days=settings.BOOKING_RETENTION_DAYS)
+    furniture_cutoff = timezone.now() - timedelta(days=settings.FURNITURE_RETENTION_DAYS)
     total = 0
     # Small transactions keep the cleanup from locking large tables for long.
     while True:
         ids = list(
-            Booking.objects.filter(created_at__lte=cutoff).values_list("pk", flat=True)[
+            Booking.objects.annotate(_retention_anchor=booking_retention_anchor()).filter(_retention_anchor__lte=booking_cutoff).values_list("pk", flat=True)[
                 :500
             ]
         )
@@ -24,7 +25,7 @@ def purge():
             total += count
     while True:
         ids = list(
-            FurnitureLoan.objects.filter(created_at__lte=cutoff).values_list(
+            FurnitureLoan.objects.filter(returned_at__isnull=False, returned_at__lte=furniture_cutoff).values_list(
                 "pk", flat=True
             )[:500]
         )

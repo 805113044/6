@@ -36,13 +36,28 @@
         <tr>
           <th scope="row"><span class="matrix-period">{{ row.period }}</span><small>{{ row.period.group }}</small><span class="period-time">{{ row.period.start|time:'H:i' }}–{{ row.period.end|time:'H:i' }}</span></th>
           {% for entry in row.cells %}
-          <td class="matrix-cell">
-            <div class="matrix-cell-head"><strong>{{ room_count }} 间教室</strong><span>{{ entry.day|date:'m/d' }}</span></div>
+          <td class="matrix-cell" data-v3-cell="1" data-v3-date="{{ entry.day|date:'Y-m-d' }}" data-v3-period="{{ row.period.pk }}" data-v3-period-name="{{ row.period }}">
+            <div class="matrix-cell-head"><strong>{{ room_count }} 间教室</strong><span>{{ entry.day|date:'m/d' }}</span><button type="button" class="v3-cell-button" data-v3-open>选择 / 预约</button></div>
+
             <div class="matrix-room-list">
               {% for item in entry.rooms %}
               <div class="matrix-room {% if item.slot.entries %}matrix-room-busy{% elif item.slot.free %}matrix-room-free{% else %}matrix-room-closed{% endif %}">
-                <a class="matrix-room-name" href="{% url 'room_detail' item.room.pk %}?date={{ entry.day|date:'Y-m-d' }}">{{ item.room.name }}</a>
-                {% for borrowed in item.slot.entries %}<span class="matrix-borrower {% if borrowed.kind == 'course' %}matrix-course{% endif %}">{{ borrowed.applicant_label }}{% if borrowed.kind == 'course' %}<small>课程</small>{% endif %}</span>{% empty %}{% if item.slot.free %}<a class="matrix-book" href="{% url 'room_detail' item.room.pk %}?date={{ entry.day|date:'Y-m-d' }}&amp;period={{ row.period.pk }}">可借用 ↗</a>{% else %}<span class="matrix-closed-label">未开放</span>{% endif %}{% endfor %}
+                <a class="matrix-room-name" {% if item.slot.free %}data-v3-room-id="{{ item.room.pk }}"{% endif %} href="{% url 'room_detail' item.room.pk %}?date={{ entry.day|date:'Y-m-d' }}">{{ item.room.name }}</a>
+                {% for borrowed in item.slot.entries %}<span class="matrix-borrower {% if borrowed.kind == 'course' %}matrix-course{% endif %}">{{ borrowed.applicant_label }}{% if borrowed.kind == 'course' %}<small>课程</small>{% endif %}</span>
+                {% if borrowed.kind == 'course' %}
+                  {% if user.is_staff or user.role == 'teacher' and user.display_name == borrowed.teacher_name %}
+                    <form method="post" action="{% url 'release_course_slot' %}" data-confirm="确定临时释放这间教室的这一节课程？仅释放所选日期与节次。">
+                      {% csrf_token %}
+                      <input type="hidden" name="room_id" value="{{ item.room.pk }}">
+                      <input type="hidden" name="date" value="{{ entry.day|date:'Y-m-d' }}">
+                      <input type="hidden" name="period_id" value="{{ row.period.pk }}">
+                      <input type="hidden" name="teacher_name" value="{{ borrowed.teacher_name }}">
+                      <input type="hidden" name="view" value="{{ mode }}">
+                      <button class="button secondary small" type="submit">临时开放此节</button>
+                    </form>
+                  {% endif %}
+                {% endif %}
+              {% empty %}{% if item.slot.free %}<a class="matrix-book" href="{% url 'room_detail' item.room.pk %}?date={{ entry.day|date:'Y-m-d' }}&amp;period={{ row.period.pk }}">可借用 ↗</a>{% else %}<span class="matrix-closed-label">未开放</span>{% endif %}{% endfor %}
               </div>
               {% endfor %}
             </div>
@@ -54,4 +69,5 @@
     </tbody>
   </table>
 </div>
+{% include "booking/quick_dialog.html" %}
 {% endblock %}

@@ -1,0 +1,4 @@
+/* Classroom Booking R21 - only a tiny status display, shared by desktop and mobile. */
+#r21-live-status{display:block;box-sizing:border-box;margin:8px 0 14px;padding:8px 12px;border:1px solid #d9e7de;border-radius:9px;background:#f5faf6;color:#37614b;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+#r21-live-status.r21-live-warning{border-color:#efca96;background:#fff8ed;color:#83511b}
+@media(max-width:800px){#r21-live-status{margin:8px 0 12px;font-size:12px;padding:8px 10px}}

@@ -11,6 +11,7 @@ from django.db import connection, transaction
 from django.db.models import Count, Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods, require_POST
 from django.views.decorators.debug import sensitive_post_parameters
@@ -66,7 +67,7 @@ class SchoolLoginView(LoginView):
     redirect_authenticated_user = True
 
     def form_valid(self, form):
-        if not form.get_user().is_staff:
+        if not (form.get_user().is_staff or (form.get_user().role == "teacher" and form.get_user().display_name.strip())):
             form.add_error(None, "此入口仅供管理员使用；普通用户无需登录。")
             return self.form_invalid(form)
         return super().form_valid(form)
@@ -176,6 +177,33 @@ def rooms(request):
         },
     )
 
+
+
+@login_required
+@require_POST
+def release_course_slot(request):
+    """Teacher releases their own imported class; staff can release any class.
+
+    Scope is exactly one classroom and one fixed borrowing period on one date.
+    Other times of the same lesson remain occupied.
+    """
+    from .timetable import release_imported_course_period
+    try:
+        room_id = int(request.POST.get("room_id", ""))
+        period_id = int(request.POST.get("period_id", ""))
+        day = date.fromisoformat(request.POST.get("date", ""))
+        teacher = request.POST.get("teacher_name", "")[:60]
+        release_imported_course_period(request.user, room_id, day, period_id, teacher)
+        messages.success(request, "指定教室的这一节教学占用已临时释放，可以预约；其他节次未改变。")
+    except (ValueError, TypeError, ValidationError) as exc:
+        messages.error(request, "未能释放该节次：" + ("；".join(exc.messages) if isinstance(exc, ValidationError) else "无效的日期或节次"))
+    mode = "day" if request.POST.get("view") == "day" else "week"
+    selected = request.POST.get("date", "")[:10]
+    try:
+        selected = date.fromisoformat(selected).isoformat()
+    except ValueError:
+        selected = timezone.localdate().isoformat()
+    return redirect(f"{reverse('schedule')}?view={mode}&date={selected}")
 
 def schedule(request):
     from .models import AcademicTerm, BorrowPeriod
@@ -383,7 +411,10 @@ def receipt(request):
 
 @sensitive_post_parameters("password", "student_id")
 def lookup(request):
+    # Never display previously verified records just by opening the URL.
+    # A successful credential check permits precisely one results-page render.
     if request.method == "POST":
+        request.session.pop("lookup_results_once", None)
         if not throttle(request, "lookup", 300) or not throttle(
             request,
             "lookup-identity",
@@ -394,7 +425,7 @@ def lookup(request):
         else:
             pk = request.POST.get("booking_id", "")[:15]
             identity = request.POST.get("student_id", "")[:40].strip()
-            password = request.POST.get("password", "")[:128]
+            password = request.POST.get("password", "")[:4097]
             if pk:
                 # Keep old saved forms compatible; the new interface omits ID.
                 booking = (
@@ -410,12 +441,17 @@ def lookup(request):
                 matched = lookup_guest_bookings(identity, password)
                 if matched:
                     grant_guests(request, matched)
+                    # IDs only (not credentials): consumed on the very next GET.
+                    # This is deliberately separate from the 15-minute detail grants.
+                    request.session["lookup_results_once"] = [b.pk for b in matched]
                     return redirect("lookup")
             messages.error(
                 request, "学号 / 工号或本次密码不正确，或没有尚在保留期内的匹配记录。"
             )
-    grants = request.session.get("booking_grants", {})
-    ids = [int(pk) for pk in grants if pk.isdigit()]
+    # Only the just-verified credential pair is visible in the right panel.
+    # Refresh/new visit consumes no marker and therefore shows an empty panel.
+    once = request.session.pop("lookup_results_once", [])
+    ids = [pk for pk in once if type(pk) is int and pk > 0] if isinstance(once, list) else []
     bookings = [
         b
         for b in Booking.objects.retained()
@@ -440,7 +476,7 @@ def verify_booking(request, pk):
         elif verify_guest(
             booking,
             request.POST.get("student_id", "")[:40],
-            request.POST.get("password", "")[:128],
+            request.POST.get("password", "")[:4097],
         ):
             grant_guest(request, booking)
             return redirect("booking_info", pk=pk)
@@ -685,14 +721,55 @@ def administrator_edit(request, pk=None):
 
 @staff_required
 def review_queue(request):
-    qs = (
-        Booking.objects.retained()
-        .filter(room__in=managed_rooms(request.user))
-        .select_related("room", "applicant")
-    )
+    """Search only permitted booking rows; never log the submitted lookup values.
+
+    All time bounds are database-friendly (no MySQL timezone conversion required).
+    Search is deliberately capped to 60 characters to bound expensive LIKE scans.
+    """
+    from django.utils.dateparse import parse_date
+    from datetime import datetime, timedelta, time
+
+    qs = (Booking.objects.retained()
+          .filter(room__in=managed_rooms(request.user))
+          .select_related("room", "applicant")
+          .order_by("-created_at", "-pk"))
     status = request.GET.get("status", "approved")
-    if status in Booking.Status.values:
+    if status != "all":
+        status = status if status in Booking.Status.values else "approved"
         qs = qs.filter(status=status)
+    kind = request.GET.get("kind", "all")
+    if kind in ("booking", "course"):
+        qs = qs.filter(kind=kind)
+    else:
+        kind = "all"
+    keyword = request.GET.get("q", "").strip()[:60]
+    if keyword:
+        qs = qs.filter(
+            Q(student_name__icontains=keyword)
+            | Q(student_id__exact=keyword)
+            | Q(title__icontains=keyword)
+            | Q(room__name__icontains=keyword)
+            | Q(teacher_name__icontains=keyword)
+            | Q(applicant__display_name__icontains=keyword)
+        )
+    date_raw = request.GET.get("date", "")[:10]
+    try:
+        selected_date = parse_date(date_raw) if len(date_raw) == 10 else None
+    except ValueError:
+        selected_date = None
+    if selected_date:
+        start = timezone.make_aware(datetime.combine(selected_date, time.min))
+        qs = qs.filter(start_at__gte=start, start_at__lt=start+timedelta(days=1))
+    params = request.GET.copy()
+    params.pop("page", None)
+    params.pop("status", None)
+    # Ensure browser pagination and status switches retain normalized filters.
+    params["q"] = keyword
+    params["kind"] = kind
+    if selected_date:
+        params["date"] = selected_date.isoformat()
+    else:
+        params.pop("date", None)
     return render(
         request,
         "booking/review.html",
@@ -700,6 +777,11 @@ def review_queue(request):
             "page": Paginator(qs, 25).get_page(request.GET.get("page")),
             "states": Booking.Status.choices,
             "active_status": status,
+            "search_q": keyword,
+            "search_kind": kind,
+            "search_date": selected_date.isoformat() if selected_date else "",
+            "filter_query": params.urlencode(),
+            "query_string": params.urlencode(),
         },
     )
 

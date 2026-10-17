@@ -1,0 +1,84 @@
+.v3-table-wrap{overflow:auto;max-width:100%;margin-top:12px}.v3-table{width:100%;border-collapse:collapse;min-width:620px}.v3-table th,.v3-table td{padding:12px 14px;text-align:left;vertical-align:middle;border-bottom:1px solid #e2e9e4;font-size:13px}.v3-table th{white-space:nowrap;background:#f4f7f4;color:#385843}.v3-table small{display:block;color:#6d8072;margin-top:4px}.v3-available{color:#267a4e}.v3-inventory,.v3-public-loans,.v3-admin-area{margin-top:18px}.v3-two-col{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr);gap:18px;margin-top:18px}.v3-inline-form{display:flex;align-items:end;flex-wrap:wrap;gap:12px;margin:15px 0}.v3-inline-form label{flex:1;min-width:150px}.v3-consent{display:flex!important;align-items:flex-start;gap:8px}.v3-consent input{width:auto;flex-shrink:0}.v3-receipt{border:2px solid #a0c5ac;background:#f5fbf6}.v3-secret{font-family:monospace;overflow-wrap:anywhere;padding:16px;border:1px dashed #4d8061;border-radius:8px;font-size:18px;background:white;user-select:all}.v3-disclosure{margin-top:18px}.v3-disclosure summary{cursor:pointer;font-weight:600}.matrix-cell[data-v3-cell]{cursor:pointer;outline-offset:-3px}.matrix-cell[data-v3-cell]:focus-visible{outline:3px solid #3e845c}.v3-cell-button{margin-left:auto;border:1px solid #b9ddc4;border-radius:8px;background:#e9f5ec;color:#24543a;padding:5px 9px;cursor:pointer;white-space:nowrap}.v3-quick-dialog{width:min(550px,calc(100vw - 20px));max-height:min(88vh,880px);overflow:auto;border:1px solid #bed3c4;border-radius:14px;padding:24px;box-shadow:0 24px 100px rgba(0,0,0,.25)}.v3-quick-dialog::backdrop{background:rgba(10,28,18,.55)}.v3-dialog-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.v3-dialog-close{border:0;background:transparent;font-size:28px;cursor:pointer}.v3-quick-dialog input,.v3-quick-dialog select{width:100%;box-sizing:border-box}.v3-quick-dialog .v3-consent input{width:auto}@media(max-width:800px){.v3-two-col{grid-template-columns:1fr}.v3-inline-form{display:grid;grid-template-columns:1fr}.v3-table{min-width:540px}.v3-quick-dialog{padding:16px}}
+
+.badge.completed{background:#e1f4e7;color:#24663d}
+
+/* Registration then full-width public register immediately below; return after. */
+.v3-two-col{display:block}
+.v3-register-stack{min-width:0;display:grid;gap:18px;align-content:start}
+.v3-register-stack .v3-public-loans{margin-top:0}
+.v3-two-col>.panel{margin-top:18px}
+.v3-register-stack .v3-table{min-width:660px}
+@media(max-width:800px){.v3-register-stack .v3-table{min-width:560px}}
+
+.v3-public-notice{background:#f4f7f5;border:1px solid #aac0b1;border-radius:9px;padding:12px 14px;line-height:1.75;margin:12px 0;font-size:13px;color:#264533}.v3-public-loans small{display:block;opacity:.75;margin-top:3px}
+
+/* R7 — per-stock admin editing; public view remains four columns. */
+.v3-stock-edit-form{display:flex;flex-wrap:wrap;align-items:end;gap:8px}
+.v3-stock-edit-form label{display:flex;flex-direction:column;gap:4px;font-size:12px;min-width:115px;flex:1}
+.v3-stock-edit-form input{box-sizing:border-box;max-width:190px;width:100%;min-height:34px;border:1px solid #cbd9ce;border-radius:7px;padding:5px 8px;font:inherit}
+.v3-stock-delete-form{margin-top:8px}
+.v3-inventory .v3-table{min-width:760px}
+@media(max-width:800px){.v3-stock-edit-form{min-width:200px}}
+
+/* V3 R8 quick booking feedback */
+.v3-quick-feedback{background:#fff2e8;border:1px solid #df8d53;color:#7b3416;padding:12px 14px;border-radius:9px;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.v3-quick-dialog button[disabled]{opacity:.6;cursor:wait}
+
+/* R11 other stock choice */
+.v11-other-label[hidden]{display:none!important}
+.furniture-item-row select[name="item_name"]{width:100%;min-height:38px;box-sizing:border-box}
+.v11-other-label input{width:100%;box-sizing:border-box}
+
+/* R13 mobile repair: keep registration inside viewport; scroll tables locally. */
+.v3-register-stack,.v3-two-col,.v3-register-stack>.panel,
+.v3-inventory,.v3-public-loans,.v3-admin-area,
+.furniture-item-list,.furniture-item-row{max-width:100%;min-width:0;box-sizing:border-box}
+.v3-register-stack .stack-form, .v3-register-stack .stack-form>label{min-width:0;max-width:100%;box-sizing:border-box}
+.furniture-item-row{grid-template-columns:minmax(0,1.2fr) minmax(85px,.65fr) 40px;gap:8px;align-items:end}
+.furniture-item-row:has(>.v11-other-label:not([hidden])){grid-template-columns:minmax(0,1fr) minmax(0,1fr) 94px 40px}
+.furniture-item-row label{min-width:0;max-width:100%;overflow:hidden}
+.furniture-item-row input,.furniture-item-row select{display:block;width:100%;min-width:0;max-width:100%;box-sizing:border-box;text-overflow:ellipsis}
+.furniture-item-row .v11-other-label[hidden]{display:none!important}
+.v3-table-wrap{width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.v3-two-col>.panel,.v3-register-stack>.panel{min-width:0;box-sizing:border-box}
+/* Week schedule: substantially narrower columns without hiding room names. */
+.schedule-matrix{min-width:1170px;table-layout:fixed}
+.schedule-matrix th:first-child{width:100px;min-width:100px}
+.schedule-matrix .matrix-cell{min-width:0;width:150px;padding:7px}
+.schedule-matrix .matrix-cell-head{gap:3px;flex-wrap:wrap;margin-bottom:6px}
+.schedule-matrix .matrix-room-list{gap:4px}
+.schedule-matrix .matrix-room{padding:5px 6px;min-height:29px;gap:3px 4px}
+.schedule-matrix-day{min-width:0;width:100%;table-layout:fixed}
+.schedule-matrix-day .matrix-cell{width:auto;min-width:0}
+.schedule-matrix-day .matrix-room-list{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+@media(max-width:800px){
+ main,.workspace,.v3-two-col,.v3-register-stack{max-width:100%;min-width:0;box-sizing:border-box}
+ .v3-register-stack>.panel,.v3-two-col>.panel,.v3-inventory,.v3-admin-area{min-width:0;max-width:100%}
+ .furniture-item-row,.furniture-item-row:has(>.v11-other-label:not([hidden])){grid-template-columns:minmax(0,1fr) 40px;gap:7px;padding:9px}
+ .furniture-item-row>label:first-child{grid-column:1/-1}
+ .furniture-item-row>.v11-other-label:not([hidden]){grid-column:1/-1}
+ .furniture-item-row>label:has(input[name="item_quantity"]){grid-column:1;grid-row:auto}
+ .furniture-item-row>.furniture-remove{grid-column:2;align-self:end}
+ .schedule-matrix{min-width:1030px}
+ .schedule-matrix th:first-child{width:86px;min-width:86px}
+ .schedule-matrix .matrix-cell{width:132px;min-width:0;padding:5px}
+ .schedule-matrix .matrix-room{padding:4px 5px;min-height:27px}
+ .schedule-matrix .matrix-room-name{font-size:11px}
+ .schedule-matrix .matrix-borrower{font-size:10px}
+ .schedule-matrix-day{min-width:0;width:100%}
+ .schedule-matrix-day .matrix-cell{width:auto}
+ .v3-table{min-width:590px}
+}
+@media(max-width:480px){
+ .v3-register-stack>.panel,.v3-inventory,.v3-public-loans,.v3-admin-area{padding:12px;box-sizing:border-box}
+ .furniture-item-row,.furniture-item-row:has(>.v11-other-label:not([hidden])){grid-template-columns:minmax(0,1fr) 40px;gap:7px;padding:9px}
+ .furniture-item-row>label:first-child{grid-column:1/-1}
+ .furniture-item-row>.v11-other-label:not([hidden]){grid-column:1/-1}
+ .furniture-item-row>label:has(input[name="item_quantity"]){grid-column:1;grid-row:auto}
+ .furniture-item-row>.furniture-remove{grid-column:2;align-self:end}
+ .schedule-matrix{min-width:1010px}
+ .schedule-matrix-day{min-width:0}
+ .schedule-matrix-day .matrix-room-list{grid-template-columns:1fr}
+ .schedule-matrix .matrix-cell-head{font-size:10px}
+ .v3-cell-button{font-size:10px;padding:4px 6px}
+}

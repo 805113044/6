@@ -19,6 +19,27 @@ class LocalPlatformTests(TestCase):
     edit_data = workflow.WorkflowTests.edit_data
     verify = workflow.WorkflowTests.verify
 
+    def test_lookup_right_panel_needs_fresh_credentials_on_every_visit(self):
+        booking = self.book()
+        # Prior per-booking session grants never make a fresh GET show results.
+        self.verify(self.client, booking)
+        page = self.client.get("/lookup/")
+        self.assertEqual(list(page.context["bookings"]), [])
+        self.assertContains(page, "先验证，再查看")
+        good = self.client.post("/lookup/", {
+            "student_id": booking.student_id, "password": PASSWORD})
+        self.assertEqual(good.status_code, 302)
+        shown = self.client.get("/lookup/")
+        self.assertEqual([row.pk for row in shown.context["bookings"]], [booking.pk])
+        # The one-time marker has been consumed; the old session grant is irrelevant.
+        self.assertEqual(list(self.client.get("/lookup/").context["bookings"]), [])
+        # Invalid verification must never reveal previous results.
+        invalid = self.client.post("/lookup/", {
+            "student_id": booking.student_id, "password": "not-the-password"}, follow=True)
+        self.assertEqual(list(invalid.context["bookings"]), [])
+        # Clicking into the just verified booking still respects its 15-minute grant.
+        self.assertEqual(self.client.get(f"/bookings/{booking.pk}/info/").status_code, 200)
+
     def test_credential_pair_lists_only_matching_records_and_revokes_per_record(self):
         first = self.book()
         second = self.book(start_at=interval(14)[0], end_at=interval(14)[1])

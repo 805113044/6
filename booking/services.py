@@ -5,6 +5,7 @@ from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.contrib.auth.hashers import make_password, check_password
 from django.contrib.auth.password_validation import validate_password
+from .password_policy_r16 import validate_new_password
 from django.db import transaction
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
@@ -189,7 +190,11 @@ def create_booking(
         if any(len(student[k]) > limit for k, limit in limits.items()):
             raise ValidationError("学生信息超过允许长度。")
         password = student.get("edit_password", "")
-        validate_password(password)
+        # Enforce NEW-password requirements in the transaction service too;
+        # validation cannot be bypassed by calling create_booking directly.
+        if len(password) > 4096:
+            raise ValidationError("预约新密码不能超过 4096 个字符。")
+        validate_new_password(password)
         extra = {k: student[k].strip() for k in limits}
         extra["edit_password_hash"] = make_password(password)
         extra["credential_tag"] = credential_tag(extra["student_id"], password)
@@ -343,12 +348,7 @@ def edit_booking(
     validate_interval(
         room, start_at, end_at, participants, course=booking.kind == "course"
     )
-    if booking.kind == "booking" and end_at >= booking.created_at + timedelta(
-        days=settings.RETENTION_DAYS
-    ):
-        raise ValidationError(
-            "新的使用日期超出本记录的保留期限，请取消原预约并新建一笔预约。"
-        )
+    # Data retention starts after actual return or scheduled end, not creation.
     check_overlap(room, start_at, end_at, exclude=pk)
     # Keep a masked operation note: snapshots containing student PII are unnecessary.
     changed = [
@@ -375,7 +375,9 @@ def edit_booking(
             setattr(booking, name, value)
         new_password = student.get("edit_password", "")
         if new_password:
-            validate_password(new_password)
+            if len(new_password) > 4096:
+                raise ValidationError("预约新密码不能超过 4096 个字符。")
+            validate_new_password(new_password)
             booking.edit_password_hash = make_password(new_password)
             booking.credential_tag = credential_tag(booking.student_id, new_password)
         elif booking.student_id != old_student_id:

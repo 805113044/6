@@ -2,13 +2,15 @@ from datetime import timedelta
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
-from .models import FurnitureLoan, User
+from .models import FurnitureLoan, FurnitureStock, User
 
 
 @override_settings(RETENTION_DAYS=21)
 class FurnitureLoanTests(TestCase):
     @classmethod
     def setUpTestData(cls):
+        FurnitureStock.objects.create(name="桌子", total_count=100)
+        FurnitureStock.objects.create(name="椅子", total_count=100)
         cls.manager = User.objects.create_user(
             username="furniture-manager",
             password="manager-test-password!2026",
@@ -22,6 +24,8 @@ class FurnitureLoanTests(TestCase):
             "phone": "13800138000",
             "purpose": "教室活动",
             "consent": "on",
+            "loan_password": "table-test-password9",
+            "loan_password_confirm": "table-test-password9",
             "item_name": ["桌子", "椅子"],
             "item_quantity": ["2", "6"],
         }
@@ -37,7 +41,7 @@ class FurnitureLoanTests(TestCase):
             [{"name": "桌子", "quantity": 2}, {"name": "椅子", "quantity": 6}],
         )
         self.assertNotContains(response, "13800138000")
-        self.assertNotContains(response, "2026123456")
+        self.assertContains(response, "2026123456")
         self.client.post(f"/furniture/{loan.pk}/return/")
         loan.refresh_from_db()
         self.assertIsNone(loan.returned_at)
@@ -66,7 +70,8 @@ class FurnitureLoanTests(TestCase):
         self.client.post("/furniture/", self.payload())
         old = FurnitureLoan.objects.get()
         FurnitureLoan.objects.filter(pk=old.pk).update(
-            created_at=timezone.now() - timedelta(days=22)
+            created_at=timezone.now() - timedelta(days=150),
+            returned_at=timezone.now() - timedelta(days=91),
         )
         self.client.post("/furniture/", self.payload(borrower_name="新同学"))
         call_command("purge_expired", verbosity=0)

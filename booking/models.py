@@ -62,10 +62,29 @@ class Room(models.Model):
         return f"{self.building} · {self.name}"
 
 
+def booking_retention_anchor():
+    """Start cleanup clock after an explicit action or scheduled use end.
+
+    Completed / cancelled / rejected records anchor to staff action timestamp
+    when it exists. Other records anchor to end_at, never to created_at.
+    Unfinished future reservations are not expired by creation age.
+    """
+    return models.Case(
+        models.When(
+            status__in=["completed", "returned", "cancelled", "rejected"],
+            reviewed_at__isnull=False,
+            then=models.F("reviewed_at"),
+        ),
+        default=models.F("end_at"),
+        output_field=models.DateTimeField(),
+    )
+
+
 class BookingQuerySet(models.QuerySet):
     def retained(self):
-        return self.filter(
-            created_at__gt=timezone.now() - timedelta(days=settings.RETENTION_DAYS)
+        cutoff = timezone.now() - timedelta(days=settings.BOOKING_RETENTION_DAYS)
+        return self.annotate(_retention_anchor=booking_retention_anchor()).filter(
+            _retention_anchor__gt=cutoff
         )
 
     def occupying(self):
@@ -79,6 +98,7 @@ class Booking(models.Model):
         REJECTED = "rejected", "已驳回"
         CANCELLED = "cancelled", "已取消"
         RETURNED = "returned", "已退回"
+        COMPLETED = "completed", "已归还"
 
     class Kind(models.TextChoices):
         BOOKING = "booking", "预约"
@@ -201,6 +221,25 @@ class LoginAttempt(models.Model):
     updated_at = models.DateTimeField(default=timezone.now)
 
 
+class FurnitureStock(models.Model):
+    name = models.CharField("物品名称", max_length=60, unique=True)
+    total_count = models.PositiveIntegerField("库存总数", default=0)
+    loaned_count = models.PositiveIntegerField("未归还数量", default=0)
+    is_active = models.BooleanField("可借用", default=True)
+
+    @property
+    def available(self):
+        return max(0, self.total_count - self.loaned_count)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "桌椅库存"
+        verbose_name_plural = "桌椅库存"
+
+    def __str__(self):
+        return self.name
+
+
 class FurnitureLoan(models.Model):
     """Short-lived desk/chair checkout record; personal details stay staff-only."""
 
@@ -211,6 +250,12 @@ class FurnitureLoan(models.Model):
     items = models.JSONField("物品和数量", default=list)
     created_at = models.DateTimeField("登记时间", default=timezone.now, db_index=True)
     returned_at = models.DateTimeField("归还时间", null=True, blank=True)
+    return_code_hash = models.CharField(max_length=128, blank=True, default="", editable=False)
+    public_consent = models.BooleanField(default=False)
+    public_student_id = models.BooleanField(default=False)
+    registered_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="furniture_registrations")
+    return_source = models.CharField(max_length=12, blank=True, default="")
+    returned_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="furniture_returns")
 
     class Meta:
         ordering = ["-created_at"]

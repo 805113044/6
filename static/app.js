@@ -41,3 +41,10 @@ if (furnitureForm) {
     if (!rows.children.length) rows.append(template.content.cloneNode(true));
   });
 }
+
+// Clear stale booking lookup results on browser back/forward cache restore.
+window.addEventListener('pageshow', event => {
+  if (event.persisted && document.querySelector('[data-lookup-results-shown]')) {
+    window.location.reload();
+  }
+});

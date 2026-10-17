@@ -108,8 +108,9 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
-        "OPTIONS": {"min_length": 10},
+        "OPTIONS": {"min_length": 6},
     },
+    {"NAME": "booking.password_policy_r16.LettersDigitsPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
@@ -150,8 +151,32 @@ SECURE_HSTS_PRELOAD = False
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 RETENTION_DAYS = min(30, max(2, int(os.getenv("RETENTION_DAYS", "21"))))
+# Classroom reservations only: approximately three months (90 days).
+# Furniture and rate-limit records retain their independent existing policy.
+BOOKING_RETENTION_DAYS = 90
+# Desktop/chair records have a separate clock that starts only after physical return.
+FURNITURE_RETENTION_DAYS = 90
 BOOKING_ADVANCE_DAYS = min(
     14, RETENTION_DAYS - 1, max(1, int(os.getenv("BOOKING_ADVANCE_DAYS", "14")))
 )
+# Server-secret pepper protects new password hashes if only the database leaks.
+# Keep old hashers available to authenticate all existing users/borrowers.
+PASSWORD_HASHERS = [
+    "booking.password_hashers.PepperedPBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
+    "django.contrib.auth.hashers.Argon2PasswordHasher",
+    "django.contrib.auth.hashers.BCryptSHA256PasswordHasher",
+    "django.contrib.auth.hashers.ScryptPasswordHasher",
+]
+# Small request/form ceilings reduce anonymous large-form abuse without changing file imports.
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 300
+SECURE_REFERRER_POLICY = "same-origin"
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+# Shorten the lifetime of stolen browser sessions while preserving workflows.
+SESSION_COOKIE_AGE = 4 * 3600
+SESSION_SAVE_EVERY_REQUEST = False
+SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin"
+DEFAULT_EXCEPTION_REPORTER_FILTER = "booking.security_r15.RedactedExceptionFilter"
 DATA_UPLOAD_MAX_MEMORY_SIZE = 2 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 2 * 1024 * 1024

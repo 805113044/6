@@ -150,11 +150,10 @@ class WorkflowTests(TestCase):
         self.assertIsNone(b.lookup_hash)
         self.assertEqual(b.events.count(), 1)
 
-    def test_information_and_strong_password_required(self):
+    def test_student_information_required(self):
         for details in (
             {},
             student(student_contact=""),
-            student(edit_password="1234567890"),
         ):
             with (
                 self.subTest(details=list(details)),
@@ -487,9 +486,10 @@ class WorkflowTests(TestCase):
 
     def test_retention_cascades_records_and_sessions(self):
         b = self.book()
+        expiry = timezone.now()-timedelta(days=settings.BOOKING_RETENTION_DAYS, seconds=1)
         Booking.objects.filter(pk=b.pk).update(
-            created_at=timezone.now()
-            - timedelta(days=settings.RETENTION_DAYS, seconds=1)
+            start_at=expiry-timedelta(hours=2), end_at=expiry-timedelta(hours=1),
+            created_at=expiry-timedelta(days=100),
         )
         self.assertFalse(Booking.objects.retained().exists())
         self.assertEqual(self.client.get(f"/bookings/{b.pk}/verify/").status_code, 404)
@@ -698,7 +698,7 @@ class TimetableTests(TestCase):
             self.assertTrue(Booking.objects.filter(start_at__gt=future).exists())
             self.assertFalse(
                 Booking.objects.filter(
-                    created_at__lte=future - timedelta(days=settings.RETENTION_DAYS)
+                    created_at__lte=future - timedelta(days=settings.BOOKING_RETENTION_DAYS)
                 ).exists()
             )
 

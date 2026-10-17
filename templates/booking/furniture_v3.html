@@ -1,0 +1,85 @@
+{% extends 'base.html' %}
+{% block title %}桌椅库存、借用与归还 - 教室借用平台{% endblock %}
+{% block content %}
+<div class="page-heading furniture-heading"><div><div class="eyebrow">EQUIPMENT INVENTORY / BORROWING</div><h1>桌椅借用与库存</h1><p>库存和借用表对所有访问者公开。新登记的姓名、完整学号/工号、借用物品、数量与归还状态会直接展示；电话和借用密码不公开。</p></div></div>
+<section class="panel v3-inventory"><div class="section-line"><h2>桌椅库存总览</h2><span>实时显示总数、借出数、当前可借数</span></div>
+<div class="v3-table-wrap"><table class="v3-table"><thead><tr><th>物品</th><th>库存总数</th><th>未归还数量</th><th>当前可借</th>{% if user.is_staff %}<th>修改 / 删除（仅管理员）</th>{% endif %}</tr></thead><tbody>
+{% for stock in inventory %}<tr>
+  <td><strong>{{ stock.name }}</strong></td>
+  <td>{{ stock.total_count }}</td>
+  <td>{{ stock.loaned_count }}</td>
+  <td><strong class="v3-available">{{ stock.available }}</strong></td>
+  {% if user.is_staff %}<td>
+    <form method="post" action="{% url 'furniture_stock_update' stock.pk %}" class="v3-stock-edit-form">{% csrf_token %}
+      <label>物品名称<input type="text" name="name" value="{{ stock.name }}" maxlength="60" required></label>
+      <label>库存总件数<input type="number" name="total_count" value="{{ stock.total_count }}" min="0" max="100000" required></label>
+      <button class="button secondary small" type="submit">保存修改</button>
+    </form>
+    <form method="post" action="{% url 'furniture_stock_delete' stock.pk %}" data-confirm="确认删除这个物品？删除后不再出现在公开库存表或可借用选项中；历史借用记录保留。" class="v3-stock-delete-form">{% csrf_token %}
+      <button class="button danger small" type="submit">删除物品</button>
+    </form>
+  </td>{% endif %}
+</tr>
+{% empty %}<tr><td colspan="{% if user.is_staff %}5{% else %}4{% endif %}">暂无启用的桌椅库存。管理员可在下方新增物品。</td></tr>{% endfor %}
+</tbody></table></div>
+</section>
+<div class="v3-two-col"><div class="v3-register-stack"><section class="panel"><h2>登记借用</h2><p class="muted">每次可登记多种物品和数量。库存物品自动扣减可借数，“其他”只登记、不扣减尚未建立的库存；记录显示在下方公开表格；实际归还后保存90天。</p>
+<form method="post" action="{% url 'furniture_loans' %}" data-furniture-form class="stack-form">{% csrf_token %}
+{{ form.non_field_errors }}
+<label>姓名（管理员本人借用可留空，自动填写账户姓名）{{ form.borrower_name }}{{ form.borrower_name.errors }}</label>
+<label>学号 / 工号 *{{ form.student_id }}{{ form.student_id.errors }}</label>
+<label>电话 *{{ form.phone }}{{ form.phone.errors }}</label>
+<label>借用用途 {{ form.purpose }}{{ form.purpose.errors }}</label>
+<label>自行设置桌椅借用密码 *{{ form.loan_password }}{{ form.loan_password.errors }}</label>
+<label>再次填写借用密码 *{{ form.loan_password_confirm }}{{ form.loan_password_confirm.errors }}</label>
+<p class="muted">密码由借用人自行设置，不生成随机归还凭证。归还时仅填学号和该密码；如有多笔使用相同密码的未归还登记，将一并归还。</p>
+<div class="section-line"><h3>借用物品及数量</h3><button type="button" class="button secondary small" data-add-loan-item>＋ 添加一项</button></div>
+<div data-loan-items class="furniture-item-list">{% for name,quantity,custom in item_rows %}<div class="furniture-item-row">
+  <label>借用物品<select name="item_name" required aria-label="从管理员库存选择物品"><option value="">请选择物品</option>{% for stock in inventory %}{% if stock.is_active %}<option value="{{ stock.name }}" {% if name == stock.name %}selected{% endif %}>{{ stock.name }}（剩余 {{ stock.available }}）</option>{% endif %}{% endfor %}<option value="__OTHER__" {% if name == '__OTHER__' %}selected{% endif %}>其他（自行填写）</option></select></label>
+  <label class="v11-other-label" {% if name != '__OTHER__' %}hidden{% endif %}>其他物品名称<input name="item_custom_name" maxlength="60" placeholder="填写实际物品名称" value="{{ custom }}" {% if name == '__OTHER__' %}required{% endif %}></label>
+  <label>借用数量<input name="item_quantity" type="number" min="1" max="500" required value="{{ quantity }}"></label>
+  <button type="button" data-remove-loan-item class="furniture-remove" aria-label="删除这一项">×</button>
+</div>{% endfor %}</div>
+<datalist id="v3-stock-names">{% for stock in inventory %}{% if stock.is_active %}<option value="{{ stock.name }}">{% endif %}{% endfor %}</datalist>
+<template id="loan-item-template"><div class="furniture-item-row">
+  <label>借用物品<select name="item_name" required aria-label="从管理员库存选择物品"><option value="">请选择物品</option>{% for stock in inventory %}{% if stock.is_active %}<option value="{{ stock.name }}">{{ stock.name }}（剩余 {{ stock.available }}）</option>{% endif %}{% endfor %}<option value="__OTHER__">其他（自行填写）</option></select></label>
+  <label class="v11-other-label" hidden>其他物品名称<input name="item_custom_name" maxlength="60" placeholder="填写实际物品名称"></label>
+  <label>借用数量<input name="item_quantity" type="number" min="1" max="500" required></label>
+  <button type="button" data-remove-loan-item class="furniture-remove" aria-label="删除这一项">×</button>
+</div></template>
+<p class="muted">只能从管理员设置的库存物品中选取；如选择“其他”，再填写物品名称。其他物品仅记录借用，不会自动扣减管理员尚未设置的库存。</p>
+<div class="v3-public-notice" role="note"><strong>公开信息提示（无需勾选）：</strong>提交后，姓名、完整学号/工号、借用物品与数量、登记时间及归还状态会公开显示在下方表格，所有访问本平台的人都可查看；电话和借用密码不会公开。请勿填写其他人的身份信息。</div>
+<button type="submit" class="button full">确认借用并登记</button>
+</form></section>
+<section class="panel v3-public-loans"><div class="section-line"><div><h2>公开借用登记表（所有用户可见）</h2><p class="muted">新登记直接显示完整学号；历史记录没有公开依据的仍不公开。电话和借用密码不公开。</p></div><span>{{ public_page.paginator.count }} 条登记</span></div>
+<div class="v3-table-wrap"><table class="v3-table"><thead><tr><th>登记编号</th><th>姓名</th><th>学号 / 工号</th><th>借用物品与数量</th><th>登记时间</th><th>经办管理员</th><th>归还状态 / 确认人</th>{% if user.is_staff %}<th>管理操作</th>{% endif %}</tr></thead><tbody>
+{% for loan in public_page %}<tr><td>#{{ loan.pk }}</td><td><strong>{{ loan.borrower_name }}</strong></td><td>{% if loan.public_student_id %}{{ loan.student_id }}{% else %}<span class="muted">未公开</span>{% endif %}</td><td>{% for item in loan.items %}<span class="furniture-item-chip">{{ item.name }} × {{ item.quantity }}</span>{% endfor %}</td><td>{{ loan.created_at|date:'Y-m-d H:i' }}</td><td>{% if loan.registered_by %}{{ loan.registered_by.display_name|default:loan.registered_by.username }}{% else %}学生自主登记{% endif %}</td><td>{% if loan.returned_at %}<span class="badge approved">已归还</span>{% if loan.returned_by %}<small>管理员：{{ loan.returned_by.display_name|default:loan.returned_by.username }}</small>{% endif %}{% else %}<span class="badge pending">借用中</span>{% endif %}</td>
+{% if user.is_staff %}<td><form method="post" action="{% url 'furniture_admin_delete' loan.pk %}" class="v3-delete-loan-form" data-confirm="{% if loan.returned_at %}确认删除这条已归还登记？{% else %}确认实物已经收回或登记作废？删除后将释放对应库存，且记录不可恢复。{% endif %}">{% csrf_token %}{% if not loan.returned_at %}<input type="hidden" name="confirm_release" value="yes">{% endif %}<button type="submit" class="button danger small">删除记录</button></form></td>{% endif %}</tr>
+{% empty %}<tr><td colspan="{% if user.is_staff %}8{% else %}7{% endif %}">暂无公开的借用登记。新借用登记成功后，会自动出现在这里。</td></tr>{% endfor %}
+</tbody></table></div>
+{% if public_page.has_other_pages %}<nav class="pagination">{% if public_page.has_previous %}<a href="?page={{ public_page.previous_page_number }}">上一页</a>{% endif %} 第 {{ public_page.number }} / {{ public_page.paginator.num_pages }} 页 {% if public_page.has_next %}<a href="?page={{ public_page.next_page_number }}">下一页</a>{% endif %}</nav>{% endif %}
+</section>
+</div>
+<section class="panel"><h2>学生自主归还</h2><p class="muted">将桌椅实际交回后，只需填写<strong>学号 / 工号＋借用时自己设置的密码</strong>。该学号使用相同密码的所有未归还登记会一起归还。</p>
+<form method="post" action="{% url 'furniture_self_return' %}" class="stack-form" data-confirm="请确认物品已经实际交还；此学号及密码对应的所有未归还桌椅记录将一起变为已归还。">{% csrf_token %}
+<label>学号 / 工号<input name="student_id" maxlength="40" required autocomplete="off"></label>
+<label>借用时自己设置的密码<input name="password" type="password" maxlength="4096" required autocomplete="off"></label>
+<button type="submit" class="button full secondary">确认物品已经归还</button>
+</form><div class="tip"><p>旧版本通过系统生成归还凭证登记的借用，如不记得原凭证，请管理员核对后直接标记归还。</p></div></section></div>
+
+{% if user.is_staff %}
+<section class="panel v3-admin-area"><h2>管理员：我的显示姓名</h2><p class="muted">用于桌椅借用登记及归还经办人公开展示。</p><form method="post" action="{% url 'furniture_operator_name' %}" class="v3-inline-form">{% csrf_token %}<label>我的姓名<input name="display_name" value="{{ user.display_name|default:user.username }}" maxlength="60" required></label><button class="button secondary" type="submit">保存姓名</button></form></section>
+<section class="panel v3-admin-area"><h2>管理员：新增桌椅种类 / 重新启用</h2><p class="muted">新增物品填写名称及总数；已有物品请直接在顶部库存表修改名称或总数。删除物品会从借用选项隐藏，但保留历史登记；如有未归还物品，须先归还才能改名或删除。输入已停用的原名称可重新启用。</p>
+<form method="post" action="{% url 'furniture_stock_save' %}" class="v3-inline-form">{% csrf_token %}<label>物品名称<input name="name" list="v3-stock-names" maxlength="60" required></label><label>库存总件数<input type="number" name="total_count" min="0" max="100000" required></label><button type="submit" class="button">保存库存</button></form>
+<details class="v3-disclosure"><summary>库存实物盘点修正（管理员专用，留操作日志）</summary><p class="muted">当长期未归还记录因保留期限已清理、但实物数量发生变化时，可按实物盘点修正当前可借量。不应随意调整。</p><form method="post" action="{% url 'furniture_stock_reconcile' %}" class="v3-inline-form">{% csrf_token %}<label>物品名称<select name="name">{% for stock in inventory %}<option value="{{ stock.name }}">{{ stock.name }}</option>{% endfor %}</select></label><label>当前实际可借<input type="number" name="available" min="0" required></label><label>盘点原因<input type="text" name="reason" minlength="5" maxlength="200" required></label><button class="button secondary" type="submit">记录盘点修正</button></form></details>
+</section>
+<section class="panel v3-admin-area"><div class="section-line"><h2>管理员：桌椅借用管理</h2><span>仅管理员可见学号、电话、用途</span></div>
+<form method="get" class="v3-inline-form"><label>搜索姓名 / 学号 / 电话<input name="q" value="{{ request.GET.q }}" maxlength="60"></label><label>状态<select name="state"><option value="">全部</option><option value="open" {% if request.GET.state == 'open' %}selected{% endif %}>借用中</option><option value="returned" {% if request.GET.state == 'returned' %}selected{% endif %}>已归还</option></select></label><button class="button secondary">查询</button></form>
+<div class="v3-table-wrap"><table class="v3-table"><thead><tr><th>编号 / 借用人</th><th>学号 / 电话</th><th>物品</th><th>状态 / 操作</th></tr></thead><tbody>
+{% for loan in staff_page %}<tr><td>#{{ loan.pk }} · {{ loan.borrower_name }}</td><td>{{ loan.student_id }}<small>{{ loan.phone }}</small></td><td>{% for item in loan.items %}{{ item.name }}×{{ item.quantity }} {% endfor %}</td><td>{% if loan.returned_at %}已归还{% else %}<form method="post" action="{% url 'furniture_admin_return' loan.pk %}">{% csrf_token %}<button class="button secondary small" type="submit">管理员直接标记已还</button></form>{% endif %}<form method="post" action="{% url 'furniture_admin_delete' loan.pk %}" class="v3-delete-loan-form" data-confirm="{% if loan.returned_at %}删除已归还登记？{% else %}确认已收回物品或原登记作废？这会释放库存并删除记录。{% endif %}">{% csrf_token %}{% if not loan.returned_at %}<input type="hidden" name="confirm_release" value="yes">{% endif %}<button class="button danger small" type="submit">删除记录</button></form></td></tr>
+{% empty %}<tr><td colspan="4">无符合条件的记录</td></tr>{% endfor %}
+</tbody></table></div>
+{% if staff_page.has_other_pages %}<nav class="pagination">{% if staff_page.has_previous %}<a href="?staff_page={{ staff_page.previous_page_number }}&amp;q={{ request.GET.q|urlencode }}">上一页</a>{% endif %} 第 {{ staff_page.number }} / {{ staff_page.paginator.num_pages }} 页 {% if staff_page.has_next %}<a href="?staff_page={{ staff_page.next_page_number }}&amp;q={{ request.GET.q|urlencode }}">下一页</a>{% endif %}</nav>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

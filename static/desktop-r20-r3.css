@@ -1,0 +1,97 @@
+/* Classroom Booking R20 — conservative desktop refinements only.
+   The link also has media="screen and (min-width: 801px)".
+   No rules may apply to widths <= 800px. Existing mobile R17/R18 remains untouched.
+   Keep the established green palette and all application geometry/behavior. */
+@media screen and (min-width: 801px) {
+  /* Typography: keep the system font; improve hierarchy and legibility. */
+  body { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+  .sidebar .brand { font-size: 19px; font-weight: 750; letter-spacing: -.025em; line-height: 1.32; }
+  .sidebar .brand small { font-size: 10.5px; font-weight: 500; letter-spacing: .025em; }
+  .sidebar .nav-label, .sidebar nav .nav-label { font-size: 11px; letter-spacing: .065em; }
+  .sidebar nav a { font-size: 13.5px; font-weight: 600; line-height: 1.5; border-radius: 10px;
+    transition: background-color .16s ease, box-shadow .16s ease; }
+  .sidebar nav a:hover { background-color: var(--green-light); }
+  .sidebar nav a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+  .sidebar-bottom, .sidebar-bottom p { font-size: 11.5px; line-height: 1.65; }
+  .topbar .breadcrumb { font-size: 12.5px; letter-spacing: .012em; }
+  .topbar .account, .topbar .account a { font-size: 13px; }
+
+  .eyebrow { font-size: 11px; letter-spacing: .09em; font-weight: 700; }
+  .page-heading { margin-bottom: 22px; }
+  .page-heading h1 { font-size: clamp(26px, 2vw, 31px); line-height: 1.25;
+    letter-spacing: -.028em; font-weight: 750; }
+  .page-heading p { font-size: 13.5px; line-height: 1.72; }
+  .section-line h2, .panel > h2 { font-size: 19px; line-height: 1.35; letter-spacing: -.014em; }
+  .section-line > span { font-size: 12.5px; }
+  .panel h3, .furniture-items-heading h3 { font-size: 16px; line-height: 1.43; }
+  .muted, .tip { line-height: 1.65; }
+
+  /* Surface finishing: small radii/shadows, without moving grids or columns. */
+  .panel { border-radius: 14px; box-shadow: 0 4px 18px rgba(25, 62, 44, .045); }
+  .stats > div, .verified-booking, .review-list article, .room-card {
+    border-radius: 12px; box-shadow: 0 2px 12px rgba(25, 62, 44, .035);
+  }
+  .room-body { line-height: 1.63; }
+  .room-body h3 { letter-spacing: -.01em; }
+  .notice, .errorlist { border-radius: 10px; line-height: 1.6; }
+  .v3-public-notice, .furniture-guide { border-radius: 11px; }
+
+  /* Form controls: keep their existing dimensions and business behavior. */
+  input[type="text"], input[type="password"], input[type="email"],
+  input[type="search"], input[type="tel"], input[type="number"],
+  input[type="date"], input[type="datetime-local"], select, textarea {
+    border-radius: 9px; font-size: 13.5px; line-height: 1.5;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  label { font-size: 13px; line-height: 1.5; }
+  .stack-form { gap: 13px; }
+  .stack-form p label { margin-bottom: 6px; }
+  .filter-grid, .report-filters { row-gap: 12px; }
+  input[type="text"]:focus-visible, input[type="password"]:focus-visible,
+  input[type="email"]:focus-visible, input[type="search"]:focus-visible,
+  input[type="tel"]:focus-visible, input[type="number"]:focus-visible,
+  input[type="date"]:focus-visible, input[type="datetime-local"]:focus-visible,
+  select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--green); outline-offset: 1px;
+  }
+
+  /* Buttons and tabs: consistent typography, subtle hover feedback. */
+  .button, button.button, .button.small { border-radius: 9px; font-size: 13px;
+    font-weight: 650; line-height: 1.45; letter-spacing: .004em;
+    transition: filter .15s ease, box-shadow .15s ease; }
+  .button:not(:disabled):hover, button.button:not(:disabled):hover {
+    filter: brightness(1.025); box-shadow: 0 3px 10px rgba(25, 62, 44, .10);
+  }
+  .button:focus-visible, button.button:focus-visible,
+  .tabs a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+  .tabs a { border-radius: 9px; font-size: 13px; font-weight: 600;
+    transition: background-color .15s ease; }
+
+  /* Tables and schedule: improve scanability without changing column geometry. */
+  .v3-table th, .v3-table td, .furniture-table th, .furniture-table td {
+    font-size: 13px; line-height: 1.55;
+  }
+  .v3-table th, .furniture-table th { font-weight: 700; letter-spacing: .012em; }
+  .v3-table tbody tr:hover, .furniture-table tbody tr:hover {
+    background-color: rgba(39, 110, 71, .035);
+  }
+  .schedule-matrix thead th { font-weight: 700; }
+  .schedule-matrix .matrix-period { font-weight: 700; }
+  .schedule-matrix .matrix-room-name { font-weight: 600; }
+  .v3-cell-button { border-radius: 8px; font-weight: 650;
+    transition: filter .15s ease; }
+  .v3-cell-button:hover { filter: brightness(.975); }
+  .v3-quick-dialog { border-radius: 16px; box-shadow: 0 20px 70px rgba(18, 52, 35, .20); }
+  .v3-quick-dialog .v3-dialog-head { margin-bottom: 12px; }
+  .v3-receipt { border-radius: 12px; }
+
+  /* Maintain accessibility for users who prefer reduced motion. */
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar nav a, .button, button.button, .tabs a, .v3-cell-button,
+    input[type="text"], input[type="password"], input[type="email"],
+    input[type="search"], input[type="tel"], input[type="number"],
+    input[type="date"], input[type="datetime-local"], select, textarea {
+      transition: none;
+    }
+  }
+}

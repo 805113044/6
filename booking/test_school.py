@@ -305,26 +305,19 @@ class SchoolPolicyTests(TestCase):
         self.assertEqual(rule["week_pattern"], "odd")
         self.assertEqual((rule["start"], rule["end"]), (time(8), time(11, 40)))
 
-    def test_one_month_cap_and_edit_cannot_extend_lifetime(self):
-        self.assertLessEqual(settings.RETENTION_DAYS, 30)
+    def test_return_based_retention_and_edit_within_advance(self):
+        self.assertEqual(settings.BOOKING_RETENTION_DAYS, 90)
         b = self.book()
-        old = timezone.now() - timedelta(days=settings.RETENTION_DAYS - 1)
+        old = timezone.now() - timedelta(days=settings.BOOKING_RETENTION_DAYS - 1)
         Booking.objects.filter(pk=b.pk).update(created_at=old)
         start, end = interval(14, offset=3)
-        with self.assertRaises(ValidationError):
-            edit_booking(
-                AnonymousUser(),
-                b.pk,
-                room_id=b.room_id,
-                title="延后",
-                start_at=start,
-                end_at=end,
-                participants=1,
-                student=student(),
-                guest_authorized=True,
-                expected_version=1,
-            )
-        self.assertLess(settings.BOOKING_ADVANCE_DAYS, settings.RETENTION_DAYS)
+        updated = edit_booking(
+            AnonymousUser(), b.pk, room_id=b.room_id,
+            title="延后", start_at=start, end_at=end, participants=1,
+            student=student(), guest_authorized=True, expected_version=1,
+        )
+        self.assertEqual(updated.title, "延后")
+        self.assertLess(settings.BOOKING_ADVANCE_DAYS, settings.BOOKING_RETENTION_DAYS)
 
     def test_far_future_date_course_is_kept_as_configuration(self):
         from .timetable import sync_timetables

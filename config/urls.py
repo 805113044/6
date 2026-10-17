@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import path
-from booking import views
+from booking import views, v3
 
 # System user/permission administration is reserved for superusers.
 admin.site.has_permission = lambda request: (
@@ -30,11 +30,20 @@ urlpatterns = [
     ),
     path("", views.rooms, name="rooms"),
     path("schedule/", views.schedule, name="schedule"),
-    path("furniture/", views.furniture_loans, name="furniture_loans"),
+    path("schedule/quick/", v3.quick_book, name="quick_book"),
+    path("furniture/return/", v3.furniture_self_return, name="furniture_self_return"),
+    path("furniture/loan/<int:pk>/delete/", v3.furniture_admin_delete, name="furniture_admin_delete"),
+    path("furniture/stock/save/", v3.stock_save, name="furniture_stock_save"),
+    path("furniture/stock/<int:pk>/edit/", v3.stock_update, name="furniture_stock_update"),
+    path("furniture/stock/<int:pk>/delete/", v3.stock_delete, name="furniture_stock_delete"),
+    path("furniture/operator/name/", v3.furniture_operator_name, name="furniture_operator_name"),
+    path("furniture/stock/reconcile/", v3.stock_reconcile, name="furniture_stock_reconcile"),
+    path("bookings/<int:pk>/admin-return/", v3.classroom_admin_return, name="classroom_admin_return"),
+    path("furniture/", v3.furniture, name="furniture_loans"),
     path(
         "furniture/<int:pk>/return/",
-        views.return_furniture_loan,
-        name="return_furniture_loan",
+        v3.furniture_admin_return,
+        name="furniture_admin_return",
     ),
     path("manage/", views.management, name="management"),
     path("manage/administrators/", views.administrators, name="administrators"),
@@ -66,6 +75,7 @@ urlpatterns = [
     path("courses/import/", views.import_courses, name="import_courses"),
     path("courses/template/", views.course_template, name="course_template"),
     path("courses/rules/<int:pk>/stop/", views.stop_timetable, name="stop_timetable"),
+    path("courses/release-slot/", views.release_course_slot, name="release_course_slot"),
     path("reports/", views.reports, name="reports"),
     path("healthz/", views.health, name="health"),
 ]

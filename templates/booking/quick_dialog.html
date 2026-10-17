@@ -1,0 +1,23 @@
+<dialog id="v3-quick-dialog" class="v3-quick-dialog" aria-labelledby="v3-quick-title">
+  <form method="post" action="{% url 'quick_book' %}" class="stack-form" id="v3-quick-form">{% csrf_token %}
+    <div class="v3-dialog-head"><h2 id="v3-quick-title">直接选择教室并预约</h2><button type="button" class="v3-dialog-close" data-v3-close aria-label="关闭">×</button></div>
+    <p id="v3-quick-context" class="muted">请选择可借用教室，填写资料后提交即占用。</p>
+    <div id="v3-quick-feedback" class="v3-quick-feedback" role="alert" aria-live="assertive" hidden></div>
+    <input name="date" type="hidden" id="v3-book-date">
+    <input name="period" type="hidden" id="v3-book-period">
+    <label>可借用教室 *<select name="room_id" id="v3-book-room" required></select></label>
+    <label>预约用途 *<input name="title" maxlength="100" required placeholder="班级活动、讨论等"></label>
+    <label>人数 *<input name="participants" type="number" min="1" max="2000" value="1" required></label>
+    {% if not user.is_staff %}
+    <label>姓名 *<input name="student_name" maxlength="60" required></label>
+    <label>学号 / 工号 *<input name="student_id" maxlength="40" required></label>
+    <label>学院 / 班级 *<input name="student_department" maxlength="80" required></label>
+    <label>联系方式 *<input name="student_contact" maxlength="100" required></label>
+    <label>本次预约修改密码（至少6位，含字母和数字） *<input name="edit_password" type="password" minlength="6" maxlength="4096" autocomplete="new-password" required></label>
+    <label>再次输入密码 *<input name="edit_password_confirm" type="password" minlength="6" maxlength="4096" autocomplete="new-password" required></label>
+<p class="v3-public-notice">提交即表示知悉：教室预约将公开借用人姓名；其他个人资料仅管理员和验证后的本人可见；教室借用归还或到期后，记录保留90天。</p>
+    {% endif %}
+    <button class="button full" type="submit" id="v3-quick-submit">确认预约，立即占用</button>
+    <p class="muted">如其他用户刚好同时提交，该教室可能被占用；服务器会再次检查，不会重复占用。</p>
+  </form>
+</dialog>
